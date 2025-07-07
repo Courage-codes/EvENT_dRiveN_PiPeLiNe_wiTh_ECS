@@ -41,3 +41,27 @@ def setup_spark_with_s3():
     except Exception as e:
         logger.exception("Failed to initialize Spark session: %s", e)
         return None
+
+def fetch_and_cache_s3_data(spark):
+    """Fetch and cache data from S3"""
+    try:
+        orders_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['orders']}"
+        items_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['order_items']}"
+        products_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['products']}"
+        
+        logger.info(f"Loading orders from: {orders_path}")
+        orders_df = spark.read.parquet(orders_path).cache()
+
+        logger.info(f"Loading order items from: {items_path}")
+        items_df = spark.read.parquet(items_path).cache()
+
+        logger.info(f"Loading products from: {products_path}")
+        products_df = spark.read.parquet(products_path).cache()
+
+        logger.info("Successfully loaded data from S3")
+        return orders_df, items_df, products_df
+
+    except Exception as e:
+        logger.exception(f"Failed to load S3 data: {e}")
+        return None, None, None
+
