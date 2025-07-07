@@ -220,3 +220,86 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
     except Exception as e:
         logger.error(f"Error writing to {table_name}: {e}", exc_info=True)
         raise
+def write_order_metrics_to_dynamodb(spark_df, table_name):
+    """Write order metrics to DynamoDB with batch operations and retry logic"""
+    logger.info(f"Writing order metrics to DynamoDB table: {table_name}")
+    
+    spark_df = spark_df.coalesce(5)
+    logger.info("Coalesced DataFrame to 5 partitions")
+
+    def process_partition(iterator):
+        dynamodb = boto_session.resource('dynamodb')
+        table = dynamodb.Table(table_name)
+        
+        class DateEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, (datetime.date, datetime.datetime)):
+                    return obj.isoformat()
+                return super().default(obj)
+
+        items_processed = 0
+        successful_items = 0
+        failed_items = 0
+        batch_items = []
+        batch_size = 25
+
+        def write_batch(items):
+            nonlocal successful_items, failed_items
+            if not items:
+                return
+            max_retries = 3
+            base_delay = 1
+            for attempt in range(max_retries + 1):
+                try:
+                    with table.batch_writer(overwrite_by_pkeys=['order_date']) as batch:
+                        for item in items:
+                            batch.put_item(Item=item)
+                    successful_items += len(items)
+                    logger.info(f"Wrote batch of {len(items)} items (attempt {attempt + 1})")
+                    return
+                except ClientError as e:
+                    error_code = e.response['Error']['Code']
+                    if error_code == 'ProvisionedThroughputExceededException' and attempt < max_retries:
+                        delay = base_delay * (2 ** attempt)
+                        logger.warning(f"Throughput exceeded, retrying in {delay}s (attempt {attempt + 1})")
+                        time.sleep(delay)
+                        continue
+                    logger.error(f"ClientError in batch write (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries:
+                        failed_items += len(items)
+                        break
+                except Exception as e:
+                    logger.error(f"Unexpected error in batch write (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries:
+                        failed_items += len(items)
+                        break
+
+        for row in iterator:
+            items_processed += 1
+            try:
+                item_dict_raw = row.asDict(recursive=True)
+                if 'order_date' not in item_dict_raw:
+                    logger.warning(f"Skipping row missing order_date: {item_dict_raw}")
+                    continue
+                item_json = json.dumps(item_dict_raw, cls=DateEncoder)
+                item_dict = json.loads(item_json, parse_float=Decimal)
+                batch_items.append(item_dict)
+                if len(batch_items) >= batch_size:
+                    write_batch(batch_items)
+                    batch_items = []
+            except Exception as e:
+                logger.error(f"Error processing row: {e}")
+                failed_items += 1
+
+        if batch_items:
+            write_batch(batch_items)
+
+        logger.info(f"Partition processed: {items_processed} items, {successful_items} successful, {failed_items} failed")
+
+    try:
+        spark_df.rdd.foreachPartition(process_partition)
+        logger.info(f"Completed writing to DynamoDB table: {table_name}")
+    except Exception as e:
+        logger.error(f"Error writing to {table_name}: {e}", exc_info=True)
+        raise
+
