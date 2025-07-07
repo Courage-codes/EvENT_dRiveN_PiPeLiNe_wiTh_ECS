@@ -14,24 +14,24 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
-          
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r .github/workflows/requirements.txt
-          
+
       - name: Configure AWS CLI
         uses: aws-actions/configure-aws-credentials@v2
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: 'us-east-1'
-          
+
       - name: Wait for ECS Cluster
         run: |
           until aws ecs describe-clusters --cluster ecommerce-data-pipeline-cluster --region us-east-1 | grep -q '"status": "ACTIVE"'; do
@@ -39,26 +39,26 @@ jobs:
             sleep 10
           done
           echo "ECS cluster is ready!"
-          
+
       - name: Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
         with:
           region: us-east-1
-        
+
       - name: Debug ECR URI
         run: |
-          echo "ECR URI for validation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-validator:latest"
-          echo "ECR URI for transformation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-transformer:latest"
-          
+          echo "ECR URI for validation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest"
+          echo "ECR URI for transformation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest"
+
       - name: Build and push validation image
         run: |
-          docker build -t ecommerce-validator:latest -f validation-image/Dockerfile .
-          docker tag ecommerce-validator:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-validator:latest
-          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-validator:latest
-          
+          docker build -t validation-ecr:latest -f validation-image/Dockerfile .
+          docker tag validation-ecr:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest
+
       - name: Build and push transformation image
         run: |
-          docker build -t ecommerce-transformer:latest -f transformation-image/Dockerfile .
-          docker tag ecommerce-transformer:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-transformer:latest
-          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/ecommerce-transformer:latest
+          docker build -t transformation-ecr:latest -f transformation-image/Dockerfile .
+          docker tag transformation-ecr:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest
