@@ -102,6 +102,7 @@ def calculate_category_metrics(items_df, orders_df, products_df):
     except Exception as e:
         logger.exception("Failed to calculate category metrics: %s", e)
         return None
+
 def calculate_order_metrics(items_df, orders_df):
     """Calculate order-level metrics including total orders, revenue, items sold, return rate, and unique customers"""
     try:
@@ -220,6 +221,7 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
     except Exception as e:
         logger.error(f"Error writing to {table_name}: {e}", exc_info=True)
         raise
+
 def write_order_metrics_to_dynamodb(spark_df, table_name):
     """Write order metrics to DynamoDB with batch operations and retry logic"""
     logger.info(f"Writing order metrics to DynamoDB table: {table_name}")
@@ -303,3 +305,66 @@ def write_order_metrics_to_dynamodb(spark_df, table_name):
         logger.error(f"Error writing to {table_name}: {e}", exc_info=True)
         raise
 
+def release_dataframe_cache(orders_df, items_df, products_df, category_metrics_df, order_metrics_df):
+    """Release cached DataFrames to free memory"""
+    try:
+        if order_metrics_df is not None:
+            order_metrics_df.unpersist()
+        if category_metrics_df is not None:
+            category_metrics_df.unpersist()
+        
+        orders_df.unpersist()
+        items_df.unpersist()
+        products_df.unpersist()
+        
+        logger.info("Successfully released cached DataFrames")
+    except Exception as e:
+        logger.warning(f"Failed to release cached DataFrames: {e}")
+
+def run_analytics_pipeline():
+    """Orchestrate the analytics pipeline"""
+    spark = None
+    try:
+        spark = setup_spark_with_s3()
+        if spark is None:
+            return
+
+        orders_df, items_df, products_df = fetch_and_cache_s3_data(spark)
+        if orders_df is None or items_df is None or products_df is None:
+            if spark:
+                spark.stop()
+            return
+
+        orders_df, items_df = transform_dataframes(orders_df, items_df)
+        if orders_df is None or items_df is None:
+            if spark:
+                spark.stop()
+            return
+
+        category_metrics_df = calculate_category_metrics(items_df, orders_df, products_df)
+        order_metrics_df = calculate_order_metrics(items_df, orders_df)
+
+        try:
+            if category_metrics_df is not None:
+                write_category_metrics_to_dynamodb(category_metrics_df, table_name="category_metrics_table")
+            else:
+                logger.warning("Category metrics DataFrame is None, skipping DynamoDB write")
+            
+            if order_metrics_df is not None:
+                write_order_metrics_to_dynamodb(order_metrics_df, table_name="order_metrics_table")
+            else:
+                logger.warning("Order metrics DataFrame is None, skipping DynamoDB write")
+        except Exception as e:
+            logger.exception("Failed to write metrics to DynamoDB: %s", e)
+
+        release_dataframe_cache(orders_df, items_df, products_df, category_metrics_df, order_metrics_df)
+
+    except Exception as e:
+        logger.exception("Analytics pipeline failed: %s", e)
+    finally:
+        if spark:
+            spark.stop()
+            logger.info("Spark session terminated")
+
+if __name__ == "__main__":
+    run_analytics_pipeline()
