@@ -34,8 +34,8 @@ jobs:
 
       - name: Wait for ECS Cluster
         run: |
-          until aws ecs describe-clusters --cluster ecommerce-data-pipeline-cluster --region us-east-1 | grep -q '"status": "ACTIVE"'; do
-            echo "Waiting for ECS cluster ecommerce-data-pipeline-cluster to be ready..."
+          until aws ecs describe-clusters --cluster ecr-dynamo-project --region us-east-1 | grep -q '"status": "ACTIVE"'; do
+            echo "Waiting for ECS cluster ecr-dynamo-project to be ready..."
             sleep 10
           done
           echo "ECS cluster is ready!"
