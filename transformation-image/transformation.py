@@ -65,3 +65,40 @@ def fetch_and_cache_s3_data(spark):
         logger.exception(f"Failed to load S3 data: {e}")
         return None, None, None
 
+def transform_dataframes(orders_df, items_df):
+    """Transform data by adding date columns and casting types"""
+    try:
+        orders_df = orders_df.withColumn("order_date", to_date(col("created_at")))
+        items_df = items_df.withColumn("sale_price", col("sale_price").cast("float"))
+        logger.info("Data transformation completed")
+        return orders_df, items_df
+    except Exception as e:
+        logger.exception("Data transformation failed: %s", e)
+        return None, None
+
+def calculate_category_metrics(items_df, orders_df, products_df):
+    """Calculate daily revenue, average order value, and return rate by category"""
+    try:
+        joined_df = (
+            items_df
+            .join(orders_df.select("order_id", "order_date"), on="order_id")
+            .join(products_df.select(col("id").alias("product_id"), "category"), on="product_id")
+            .withColumn("is_returned", when(col("status") == "returned", 1).otherwise(0))
+        )
+        logger.info("Joined data for category metrics")
+
+        metrics_df = (
+            joined_df.groupBy("category", "order_date")
+            .agg(
+                spark_round(_sum("sale_price"), 2).alias("daily_revenue"),
+                spark_round(_sum("sale_price") / countDistinct("order_id"), 2).alias("avg_order_value"),
+                spark_round(_sum("is_returned") / countDistinct("order_id"), 4).alias("avg_return_rate")
+            ).cache()
+        )
+        logger.info("Category metrics calculated")
+        metrics_df.show(5, truncate=False)
+        return metrics_df
+
+    except Exception as e:
+        logger.exception("Failed to calculate category metrics: %s", e)
+        return None
