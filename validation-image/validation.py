@@ -134,3 +134,129 @@ def validate_schema(headers, schema_name):
     logger.info(f"{schema_name} schema validation completed. Issues found: {len(validation_result['issues'])}")
     return validation_result
 
+def move_file_to_quarantine(bucket_name, source_key, quarantine_prefix):
+    """
+    Move a file from source location to quarantine folder.
+    """
+    try:
+        # Extract filename from source key
+        filename = source_key.split('/')[-1]
+        quarantine_key = quarantine_prefix + filename
+        
+        logger.info(f"Moving s3://{bucket_name}/{source_key} to s3://{bucket_name}/{quarantine_key}")
+        
+        # Copy file to quarantine
+        s3_client.copy_object(
+            CopySource={'Bucket': bucket_name, 'Key': source_key},
+            Bucket=bucket_name,
+            Key=quarantine_key
+        )
+        
+        # Delete original file
+        s3_client.delete_object(
+            Bucket=bucket_name,
+            Key=source_key
+        )
+        
+        logger.info(f"Successfully moved file to quarantine: {quarantine_key}")
+        return True
+        
+    except ClientError as e:
+        logger.error(f"Error moving file to quarantine: {e}")
+        return False
+
+
+def process_folder(bucket_name, folder_name):
+    """
+    Process all files in a specific folder.
+    """
+    logger.info(f"Processing folder: {folder_name}")
+    
+    folder_prefix = FOLDERS[folder_name]
+    quarantine_prefix = QUARANTINE_FOLDERS[folder_name]
+    
+    # List all files in the folder
+    files = list_s3_files(bucket_name, folder_prefix)
+    
+    if not files:
+        logger.info(f"No files to process in {folder_name}")
+        return
+    
+    results = {
+        'total_files': len(files),
+        'passed': 0,
+        'failed': 0,
+        'quarantined': 0
+    }
+    
+    for file_key in files:
+        logger.info(f"Processing file: {file_key}")
+        
+        # Read file header
+        headers = read_s3_file_header(bucket_name, file_key)
+        
+        # Validate schema
+        validation_result = validate_schema(headers, folder_name)
+        
+        if validation_result['is_valid']:
+            logger.info(f"✓ File passed validation: {file_key}")
+            results['passed'] += 1
+        else:
+            logger.warning(f"✗ File failed validation: {file_key}")
+            logger.warning(f"Issues: {validation_result['issues']}")
+            results['failed'] += 1
+            
+            # Move to quarantine
+            if move_file_to_quarantine(bucket_name, file_key, quarantine_prefix):
+                results['quarantined'] += 1
+    
+    # Log summary for this folder
+    logger.info(f"Folder {folder_name} processing complete:")
+    logger.info(f"  Total files: {results['total_files']}")
+    logger.info(f"  Passed: {results['passed']}")
+    logger.info(f"  Failed: {results['failed']}")
+    logger.info(f"  Quarantined: {results['quarantined']}")
+    
+    return results
+
+
+def main():
+    """
+    Main function to validate all files in all folders.
+    """
+    logger.info("Starting S3 file validation process")
+    
+    overall_results = {
+        'total_files': 0,
+        'passed': 0,
+        'failed': 0,
+        'quarantined': 0
+    }
+    
+    # Process each folder
+    for folder_name in FOLDERS.keys():
+        try:
+            results = process_folder(S3_BUCKET, folder_name)
+            if results:
+                overall_results['total_files'] += results['total_files']
+                overall_results['passed'] += results['passed']
+                overall_results['failed'] += results['failed']
+                overall_results['quarantined'] += results['quarantined']
+        except Exception as e:
+            logger.error(f"Error processing folder {folder_name}: {e}")
+    
+    # Final summary
+    logger.info("="*50)
+    logger.info("VALIDATION PROCESS COMPLETE")
+    logger.info("="*50)
+    logger.info(f"Total files processed: {overall_results['total_files']}")
+    logger.info(f"Files passed validation: {overall_results['passed']}")
+    logger.info(f"Files failed validation: {overall_results['failed']}")
+    logger.info(f"Files moved to quarantine: {overall_results['quarantined']}")
+    logger.info("="*50)
+    
+    return overall_results
+
+
+if __name__ == "__main__":
+    main()
