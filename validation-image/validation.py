@@ -99,3 +99,38 @@ def read_s3_file_header(bucket_name, key):
     except Exception as e:
         logger.error(f"Error parsing header from s3://{bucket_name}/{key}: {e}")
         return None
+
+def validate_schema(headers, schema_name):
+    """
+    Validate headers against a specific schema.
+    """
+    logger.info(f"Validating {schema_name} schema")
+    
+    validation_result = {
+        'is_valid': True,
+        'issues': [],
+        'headers_found': headers,
+        'mandatory_fields': SCHEMAS[schema_name]
+    }
+    
+    if headers is None:
+        validation_result['is_valid'] = False
+        validation_result['issues'].append("Could not read file headers")
+        return validation_result
+    
+    # Check if mandatory fields exist
+    missing_fields = [field for field in SCHEMAS[schema_name] 
+                     if field not in headers]
+    if missing_fields:
+        validation_result['is_valid'] = False
+        validation_result['issues'].append(f"Missing mandatory fields: {missing_fields}")
+    
+    # Check for extra fields (informational)
+    extra_fields = [field for field in headers 
+                   if field not in SCHEMAS[schema_name]]
+    if extra_fields:
+        validation_result['issues'].append(f"Additional fields found: {extra_fields}")
+    
+    logger.info(f"{schema_name} schema validation completed. Issues found: {len(validation_result['issues'])}")
+    return validation_result
+
