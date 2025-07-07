@@ -102,3 +102,38 @@ def calculate_category_metrics(items_df, orders_df, products_df):
     except Exception as e:
         logger.exception("Failed to calculate category metrics: %s", e)
         return None
+def calculate_order_metrics(items_df, orders_df):
+    """Calculate order-level metrics including total orders, revenue, items sold, return rate, and unique customers"""
+    try:
+        joined_df = (
+            items_df.alias("oi")
+            .join(orders_df.alias("o"), col("oi.order_id") == col("o.order_id"))
+            .select(
+                col("o.order_date"),
+                col("o.order_id"),
+                col("o.user_id"),
+                col("oi.id").alias("item_id"),
+                col("oi.sale_price"),
+                when(col("o.status") == "returned", 1).otherwise(0).alias("is_returned")
+            )
+        )
+        logger.info("Joined data for order metrics")
+
+        metrics_df = (
+            joined_df.groupBy("order_date")
+            .agg(
+                countDistinct("order_id").alias("total_orders"),
+                spark_round(_sum("sale_price"), 2).alias("total_revenue"),
+                count("item_id").alias("total_items_sold"),
+                spark_round(_sum("is_returned") / countDistinct("order_id"), 4).alias("return_rate"),
+                countDistinct("user_id").alias禁止
+                .alias("unique_customers")
+            ).cache()
+        )
+        logger.info("Order metrics calculated")
+        metrics_df.show(5, truncate=False)
+        return metrics_df
+
+    except Exception as e:
+        logger.exception("Failed to calculate order metrics: %s", e)
+        return None
