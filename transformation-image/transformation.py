@@ -19,6 +19,30 @@ DATA_PATHS = {
     'products': 'products/'
 }
 
+# DynamoDB table configurations
+DYNAMODB_TABLES = {
+    'category_metrics_table': {
+        'AttributeDefinitions': [
+            {'AttributeName': 'category', 'AttributeType': 'S'},
+            {'AttributeName': 'order_date', 'AttributeType': 'S'}
+        ],
+        'KeySchema': [
+            {'AttributeName': 'category', 'KeyType': 'HASH'},
+            {'AttributeName': 'order_date', 'KeyType': 'RANGE'}
+        ],
+        'BillingMode': 'PAY_PER_REQUEST'
+    },
+    'order_metrics_table': {
+        'AttributeDefinitions': [
+            {'AttributeName': 'order_date', 'AttributeType': 'S'}
+        ],
+        'KeySchema': [
+            {'AttributeName': 'order_date', 'KeyType': 'HASH'}
+        ],
+        'BillingMode': 'PAY_PER_REQUEST'
+    }
+}
+
 # Initialize boto3 session
 boto_session = boto3.Session(region_name=AWS_REGION)
 
@@ -27,16 +51,64 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
+def create_dynamodb_table(table_name, table_config):
+    """Create DynamoDB table if it doesn't exist"""
+    try:
+        dynamodb = boto_session.resource('dynamodb')
+        
+        # Check if table already exists
+        try:
+            table = dynamodb.Table(table_name)
+            table.load()
+            logger.info(f"Table {table_name} already exists")
+            return True
+        except ClientError as e:
+            if e.response['Error']['Code'] != 'ResourceNotFoundException':
+                logger.error(f"Error checking table {table_name}: {e}")
+                return False
+        
+        # Create the table
+        logger.info(f"Creating DynamoDB table: {table_name}")
+        table = dynamodb.create_table(
+            TableName=table_name,
+            **table_config
+        )
+        
+        # Wait for table to be created
+        logger.info(f"Waiting for table {table_name} to be created...")
+        table.wait_until_exists()
+        logger.info(f"Table {table_name} created successfully")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to create table {table_name}: {e}")
+        return False
+
+def setup_dynamodb_tables():
+    """Setup all required DynamoDB tables"""
+    logger.info("Setting up DynamoDB tables...")
+    
+    for table_name, table_config in DYNAMODB_TABLES.items():
+        if not create_dynamodb_table(table_name, table_config):
+            logger.error(f"Failed to setup table {table_name}")
+            return False
+    
+    logger.info("All DynamoDB tables are ready")
+    return True
+
 def setup_spark_with_s3():
-    """Set up Spark session with S3A configuration"""
+    """Set up Spark session with S3A configuration using path-style access"""
     try:
         spark = SparkSession.builder \
             .appName("ECSAnalytics") \
             .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
             .config("spark.hadoop.fs.s3a.endpoint", "s3.amazonaws.com") \
             .config("spark.hadoop.fs.s3a.region", AWS_REGION) \
+            .config("spark.hadoop.fs.s3a.path.style.access", "true") \
+            .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "true") \
+            .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
             .getOrCreate()
-        logger.info("Initialized Spark session with S3A configuration")
+        logger.info("Initialized Spark session with S3A path-style configuration")
         return spark
     except Exception as e:
         logger.exception("Failed to initialize Spark session: %s", e)
@@ -127,8 +199,7 @@ def calculate_order_metrics(items_df, orders_df):
                 spark_round(_sum("sale_price"), 2).alias("total_revenue"),
                 count("item_id").alias("total_items_sold"),
                 spark_round(_sum("is_returned") / countDistinct("order_id"), 4).alias("return_rate"),
-                countDistinct("user_id").alias禁止
-                .alias("unique_customers")
+                countDistinct("user_id").alias("unique_customers")
             ).cache()
         )
         logger.info("Order metrics calculated")
@@ -325,6 +396,11 @@ def run_analytics_pipeline():
     """Orchestrate the analytics pipeline"""
     spark = None
     try:
+        # Setup DynamoDB tables first
+        if not setup_dynamodb_tables():
+            logger.error("Failed to setup DynamoDB tables, exiting")
+            return
+        
         spark = setup_spark_with_s3()
         if spark is None:
             return
