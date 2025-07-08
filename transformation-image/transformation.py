@@ -124,16 +124,13 @@ def fetch_and_cache_s3_data(spark):
         products_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['products']}"
         
         logger.info(f"Loading orders from: {orders_path}")
-        orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_path)
-        logger.info(f"Orders raw count: {orders_df.count()}")
+        orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_path).cache()
 
         logger.info(f"Loading order items from: {items_path}")
-        items_df = spark.read.option("header", "true").option("inferSchema", "true").csv(items_path)
-        logger.info(f"Order items raw count: {items_df.count()}")
+        items_df = spark.read.option("header", "true").option("inferSchema", "true").csv(items_path).cache()
 
         logger.info(f"Loading products from: {products_path}")
-        products_df = spark.read.option("header", "true").option("inferSchema", "true").csv(products_path)
-        logger.info(f"Products raw count: {products_df.count()}")
+        products_df = spark.read.option("header", "true").option("inferSchema", "true").csv(products_path).cache()
 
         logger.info("Successfully loaded data from S3")
         return orders_df, items_df, products_df
@@ -142,142 +139,23 @@ def fetch_and_cache_s3_data(spark):
         logger.exception(f"Failed to load S3 data: {e}")
         return None, None, None
 
-def clean_orders(orders_df):
-    """
-    Clean and validate orders data.
-    Mandatory fields: order_id, user_id, created_at, status.
-    Impute missing values for mandatory fields.
-    """
-    logger.info("Starting cleaning for orders data.")
-
-    # Define imputation values for mandatory fields
-    impute_values = {
-        "order_id": "UNKNOWN_ORDER",
-        "user_id": "UNKNOWN_USER",
-        "created_at": "1970-01-01",  # Default date
-        "status": "UNKNOWN_STATUS"
-    }
-
-    # Impute missing values for mandatory fields
-    orders_df = orders_df.fillna(impute_values)
-
-    # Validate and convert created_at to date
-    orders_df = orders_df.withColumn("order_date", to_date(col("created_at")))
-    orders_df = orders_df.filter(col("order_date").isNotNull())
-
-    # Drop duplicate orders (if any)
-    orders_df = orders_df.dropDuplicates(["order_id"])
-
-    logger.info(f"Orders cleaned. Remaining records: {orders_df.count()}")
-    return orders_df
-
-def clean_order_items(order_items_df):
-    """
-    Clean and validate order_items data.
-    Mandatory fields: id, order_id, product_id, sale_price.
-    Impute missing values for mandatory fields.
-    """
-    logger.info("Starting cleaning for order_items data.")
-
-    # Define imputation values for mandatory fields
-    impute_values = {
-        "id": "UNKNOWN_ID",
-        "order_id": "UNKNOWN_ORDER",
-        "product_id": "UNKNOWN_PRODUCT",
-        "sale_price": 0.0  # Default price
-    }
-
-    # Impute missing values for mandatory fields
-    order_items_df = order_items_df.fillna(impute_values)
-
-    # Ensure sale_price is a valid float
-    order_items_df = order_items_df.withColumn("sale_price", col("sale_price").cast("float"))
-    order_items_df = order_items_df.filter(col("sale_price").isNotNull())
-
-    # Drop duplicate order items if necessary
-    order_items_df = order_items_df.dropDuplicates(["id"])
-
-    logger.info(f"Order items cleaned. Remaining records: {order_items_df.count()}")
-    return order_items_df
-
-def clean_products(products_df):
-    """
-    Clean and validate products data.
-    Mandatory fields: id, sku, cost, category, retail_price.
-    Impute missing values for mandatory fields.
-    """
-    logger.info("Starting cleaning for products data.")
-
-    # Define imputation values for mandatory fields
-    impute_values = {
-        "id": "UNKNOWN_ID",
-        "sku": "UNKNOWN_SKU",
-        "cost": 0.0,  # Default cost
-        "category": "UNKNOWN_CATEGORY",
-        "retail_price": 0.0  # Default price
-    }
-
-    # Impute missing values for mandatory fields
-    products_df = products_df.fillna(impute_values)
-
-    # Convert cost and retail_price to float
-    products_df = products_df.withColumn("cost", col("cost").cast("float"))
-    products_df = products_df.withColumn("retail_price", col("retail_price").cast("float"))
-    products_df = products_df.filter(col("cost").isNotNull() & col("retail_price").isNotNull())
-
-    # Drop duplicates
-    products_df = products_df.dropDuplicates(["id"])
-
-    logger.info(f"Products cleaned. Remaining records: {products_df.count()}")
-    return products_df
-
-def clean_and_transform_dataframes(orders_df, items_df, products_df):
-    """Clean and transform all dataframes with comprehensive data validation"""
+def transform_dataframes(orders_df, items_df):
+    """Transform data by adding date columns and casting types"""
     try:
-        logger.info("Starting comprehensive data cleaning and transformation...")
-        
-        # Clean each dataset using the comprehensive cleaning logic
-        orders_clean = clean_orders(orders_df)
-        order_items_clean = clean_order_items(items_df)
-        products_clean = clean_products(products_df)
-        
-        # Cache cleaned dataframes for performance
-        orders_clean.cache()
-        order_items_clean.cache()
-        products_clean.cache()
-        
-        # Validate that we have data after cleaning
-        orders_count = orders_clean.count()
-        items_count = order_items_clean.count()
-        products_count = products_clean.count()
-        
-        if orders_count == 0:
-            logger.error("No valid orders data after cleaning")
-            return None, None, None
-        if items_count == 0:
-            logger.error("No valid order items data after cleaning")
-            return None, None, None
-        if products_count == 0:
-            logger.error("No valid products data after cleaning")
-            return None, None, None
-        
-        logger.info(f"Data cleaning completed successfully:")
-        logger.info(f"  - Orders: {orders_count} records")
-        logger.info(f"  - Order Items: {items_count} records")
-        logger.info(f"  - Products: {products_count} records")
-        
-        return orders_clean, order_items_clean, products_clean
-        
+        orders_df = orders_df.withColumn("order_date", to_date(col("created_at")))
+        items_df = items_df.withColumn("sale_price", col("sale_price").cast("float"))
+        logger.info("Data transformation completed")
+        return orders_df, items_df
     except Exception as e:
-        logger.exception("Data cleaning and transformation failed: %s", e)
-        return None, None, None
+        logger.exception("Data transformation failed: %s", e)
+        return None, None
 
 def calculate_category_metrics(items_df, orders_df, products_df):
     """Calculate daily revenue, average order value, and return rate by category"""
     try:
         joined_df = (
             items_df
-            .join(orders_df.select("order_id", "order_date", "status"), on="order_id")
+            .join(orders_df.select("order_id", "order_date"), on="order_id")
             .join(products_df.select(col("id").alias("product_id"), "category"), on="product_id")
             .withColumn("is_returned", when(col("status") == "returned", 1).otherwise(0))
         )
@@ -537,7 +415,7 @@ def release_dataframe_cache(orders_df, items_df, products_df, category_metrics_d
         logger.warning(f"Failed to release cached DataFrames: {e}")
 
 def run_analytics_pipeline():
-    """Orchestrate the analytics pipeline with comprehensive data cleaning"""
+    """Orchestrate the analytics pipeline"""
     spark = None
     try:
         # Setup DynamoDB tables first
@@ -549,26 +427,21 @@ def run_analytics_pipeline():
         if spark is None:
             return
 
-        # Fetch raw data from S3
         orders_df, items_df, products_df = fetch_and_cache_s3_data(spark)
         if orders_df is None or items_df is None or products_df is None:
             if spark:
                 spark.stop()
             return
 
-        # Clean and transform data with comprehensive validation
-        orders_clean, items_clean, products_clean = clean_and_transform_dataframes(orders_df, items_df, products_df)
-        if orders_clean is None or items_clean is None or products_clean is None:
-            logger.error("Data cleaning failed, exiting pipeline")
+        orders_df, items_df = transform_dataframes(orders_df, items_df)
+        if orders_df is None or items_df is None:
             if spark:
                 spark.stop()
             return
 
-        # Calculate metrics using cleaned data
-        category_metrics_df = calculate_category_metrics(items_clean, orders_clean, products_clean)
-        order_metrics_df = calculate_order_metrics(items_clean, orders_clean)
+        category_metrics_df = calculate_category_metrics(items_df, orders_df, products_df)
+        order_metrics_df = calculate_order_metrics(items_df, orders_df)
 
-        # Write metrics to DynamoDB
         try:
             if category_metrics_df is not None:
                 write_category_metrics_to_dynamodb(category_metrics_df, table_name="category_metrics_table")
@@ -582,8 +455,7 @@ def run_analytics_pipeline():
         except Exception as e:
             logger.exception("Failed to write metrics to DynamoDB: %s", e)
 
-        # Clean up cached dataframes
-        release_dataframe_cache(orders_clean, items_clean, products_clean, category_metrics_df, order_metrics_df)
+        release_dataframe_cache(orders_df, items_df, products_df, category_metrics_df, order_metrics_df)
 
     except Exception as e:
         logger.exception("Analytics pipeline failed: %s", e)
@@ -591,7 +463,7 @@ def run_analytics_pipeline():
         if spark:
             spark.stop()
             logger.info("Spark session terminated")
-        logger.info("Analytics pipeline completed")
+        logger.info("Closing down clientserver connection")
 
 if __name__ == "__main__":
     run_analytics_pipeline()
