@@ -43,9 +43,6 @@ DYNAMODB_TABLES = {
     }
 }
 
-# Initialize boto3 session
-boto_session = boto3.Session(region_name=AWS_REGION)
-
 # Set up logging
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
@@ -54,6 +51,8 @@ logger = logging.getLogger(__name__)
 def create_dynamodb_table(table_name, table_config):
     """Create DynamoDB table if it doesn't exist"""
     try:
+        # Create a fresh boto3 session for table creation
+        boto_session = boto3.Session(region_name=AWS_REGION)
         dynamodb = boto_session.resource('dynamodb')
         
         # Check if table already exists
@@ -107,6 +106,9 @@ def setup_spark_with_s3():
             .config("spark.hadoop.fs.s3a.path.style.access", "true") \
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "true") \
             .config("spark.hadoop.fs.s3a.aws.credentials.provider", "com.amazonaws.auth.DefaultAWSCredentialsProviderChain") \
+            .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
             .getOrCreate()
         logger.info("Initialized Spark session with S3A path-style configuration")
         return spark
@@ -122,7 +124,6 @@ def fetch_and_cache_s3_data(spark):
         products_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['products']}"
         
         logger.info(f"Loading orders from: {orders_path}")
-        # Read CSV files with proper options
         orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_path).cache()
 
         logger.info(f"Loading order items from: {items_path}")
@@ -219,7 +220,17 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
     logger.info("Coalesced DataFrame to 5 partitions")
 
     def process_partition(iterator):
-        dynamodb = boto_session.resource('dynamodb')
+        # Create a new boto3 session inside the partition to avoid serialization issues
+        import boto3
+        import json
+        import time
+        import datetime
+        from decimal import Decimal
+        from botocore.exceptions import ClientError
+        
+        # Create fresh boto3 session in each partition
+        local_session = boto3.Session(region_name=AWS_REGION)
+        dynamodb = local_session.resource('dynamodb')
         table = dynamodb.Table(table_name)
         
         class DateEncoder(json.JSONEncoder):
@@ -246,21 +257,21 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
                         for item in items:
                             batch.put_item(Item=item)
                     successful_items += len(items)
-                    logger.info(f"Wrote batch of {len(items)} items (attempt {attempt + 1})")
+                    print(f"Wrote batch of {len(items)} items (attempt {attempt + 1})")
                     return
                 except ClientError as e:
                     error_code = e.response['Error']['Code']
                     if error_code == 'ProvisionedThroughputExceededException' and attempt < max_retries:
                         delay = base_delay * (2 ** attempt)
-                        logger.warning(f"Throughput exceeded, retrying in {delay}s (attempt {attempt + 1})")
+                        print(f"Throughput exceeded, retrying in {delay}s (attempt {attempt + 1})")
                         time.sleep(delay)
                         continue
-                    logger.error(f"ClientError in batch write (attempt {attempt + 1}): {e}")
+                    print(f"ClientError in batch write (attempt {attempt + 1}): {e}")
                     if attempt == max_retries:
                         failed_items += len(items)
                         break
                 except Exception as e:
-                    logger.error(f"Unexpected error in batch write (attempt {attempt + 1}): {e}")
+                    print(f"Unexpected error in batch write (attempt {attempt + 1}): {e}")
                     if attempt == max_retries:
                         failed_items += len(items)
                         break
@@ -270,7 +281,7 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
             try:
                 item_dict_raw = row.asDict(recursive=True)
                 if 'category' not in item_dict_raw or 'order_date' not in item_dict_raw:
-                    logger.warning(f"Skipping row missing required fields: {item_dict_raw}")
+                    print(f"Skipping row missing required fields: {item_dict_raw}")
                     continue
                 item_json = json.dumps(item_dict_raw, cls=DateEncoder)
                 item_dict = json.loads(item_json, parse_float=Decimal)
@@ -279,13 +290,13 @@ def write_category_metrics_to_dynamodb(spark_df, table_name):
                     write_batch(batch_items)
                     batch_items = []
             except Exception as e:
-                logger.error(f"Error processing row: {e}")
+                print(f"Error processing row: {e}")
                 failed_items += 1
 
         if batch_items:
             write_batch(batch_items)
 
-        logger.info(f"Partition processed: {items_processed} items, {successful_items} successful, {failed_items} failed")
+        print(f"Partition processed: {items_processed} items, {successful_items} successful, {failed_items} failed")
 
     try:
         spark_df.rdd.foreachPartition(process_partition)
@@ -302,7 +313,17 @@ def write_order_metrics_to_dynamodb(spark_df, table_name):
     logger.info("Coalesced DataFrame to 5 partitions")
 
     def process_partition(iterator):
-        dynamodb = boto_session.resource('dynamodb')
+        # Create a new boto3 session inside the partition to avoid serialization issues
+        import boto3
+        import json
+        import time
+        import datetime
+        from decimal import Decimal
+        from botocore.exceptions import ClientError
+        
+        # Create fresh boto3 session in each partition
+        local_session = boto3.Session(region_name=AWS_REGION)
+        dynamodb = local_session.resource('dynamodb')
         table = dynamodb.Table(table_name)
         
         class DateEncoder(json.JSONEncoder):
@@ -329,21 +350,21 @@ def write_order_metrics_to_dynamodb(spark_df, table_name):
                         for item in items:
                             batch.put_item(Item=item)
                     successful_items += len(items)
-                    logger.info(f"Wrote batch of {len(items)} items (attempt {attempt + 1})")
+                    print(f"Wrote batch of {len(items)} items (attempt {attempt + 1})")
                     return
                 except ClientError as e:
                     error_code = e.response['Error']['Code']
                     if error_code == 'ProvisionedThroughputExceededException' and attempt < max_retries:
                         delay = base_delay * (2 ** attempt)
-                        logger.warning(f"Throughput exceeded, retrying in {delay}s (attempt {attempt + 1})")
+                        print(f"Throughput exceeded, retrying in {delay}s (attempt {attempt + 1})")
                         time.sleep(delay)
                         continue
-                    logger.error(f"ClientError in batch write (attempt {attempt + 1}): {e}")
+                    print(f"ClientError in batch write (attempt {attempt + 1}): {e}")
                     if attempt == max_retries:
                         failed_items += len(items)
                         break
                 except Exception as e:
-                    logger.error(f"Unexpected error in batch write (attempt {attempt + 1}): {e}")
+                    print(f"Unexpected error in batch write (attempt {attempt + 1}): {e}")
                     if attempt == max_retries:
                         failed_items += len(items)
                         break
@@ -353,7 +374,7 @@ def write_order_metrics_to_dynamodb(spark_df, table_name):
             try:
                 item_dict_raw = row.asDict(recursive=True)
                 if 'order_date' not in item_dict_raw:
-                    logger.warning(f"Skipping row missing order_date: {item_dict_raw}")
+                    print(f"Skipping row missing order_date: {item_dict_raw}")
                     continue
                 item_json = json.dumps(item_dict_raw, cls=DateEncoder)
                 item_dict = json.loads(item_json, parse_float=Decimal)
@@ -362,13 +383,13 @@ def write_order_metrics_to_dynamodb(spark_df, table_name):
                     write_batch(batch_items)
                     batch_items = []
             except Exception as e:
-                logger.error(f"Error processing row: {e}")
+                print(f"Error processing row: {e}")
                 failed_items += 1
 
         if batch_items:
             write_batch(batch_items)
 
-        logger.info(f"Partition processed: {items_processed} items, {successful_items} successful, {failed_items} failed")
+        print(f"Partition processed: {items_processed} items, {successful_items} successful, {failed_items} failed")
 
     try:
         spark_df.rdd.foreachPartition(process_partition)
@@ -442,6 +463,7 @@ def run_analytics_pipeline():
         if spark:
             spark.stop()
             logger.info("Spark session terminated")
+        logger.info("Closing down clientserver connection")
 
 if __name__ == "__main__":
     run_analytics_pipeline()
