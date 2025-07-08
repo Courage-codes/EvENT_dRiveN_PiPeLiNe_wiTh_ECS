@@ -122,13 +122,14 @@ def fetch_and_cache_s3_data(spark):
         products_path = f"s3a://{S3_BUCKET}/{DATA_PATHS['products']}"
         
         logger.info(f"Loading orders from: {orders_path}")
-        orders_df = spark.read.parquet(orders_path).cache()
+        # Read CSV files with proper options
+        orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_path).cache()
 
         logger.info(f"Loading order items from: {items_path}")
-        items_df = spark.read.parquet(items_path).cache()
+        items_df = spark.read.option("header", "true").option("inferSchema", "true").csv(items_path).cache()
 
         logger.info(f"Loading products from: {products_path}")
-        products_df = spark.read.parquet(products_path).cache()
+        products_df = spark.read.option("header", "true").option("inferSchema", "true").csv(products_path).cache()
 
         logger.info("Successfully loaded data from S3")
         return orders_df, items_df, products_df
