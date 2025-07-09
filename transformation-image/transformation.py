@@ -326,20 +326,24 @@ def calculate_category_metrics(items_df, orders_df, products_df):
         return None
 
 def calculate_order_metrics(items_df, orders_df):
-    """Calculate order-level metrics - using the working approach from your code"""
+    """Calculate order-level metrics with explicit column selection to avoid ambiguity"""
     try:
-        joined_df = (
-            items_df
-            .join(orders_df, "order_id")
-            .select(
-                "order_date",
-                "order_id",
-                "user_id",  # This works with your data schema
-                col("id").alias("item_id"),
-                "sale_price",
-                when(col("status") == "returned", 1).otherwise(0).alias("is_returned")
-            )
+        # Explicitly select columns from each DataFrame to avoid ambiguous references
+        items_selected = items_df.select(
+            "order_id",
+            col("id").alias("item_id"),
+            "sale_price",
+            when(col("status") == "returned", 1).otherwise(0).alias("is_returned")
         )
+        
+        orders_selected = orders_df.select(
+            "order_id",
+            "order_date", 
+            "user_id"  # Only select user_id from orders table
+        )
+        
+        # Join the pre-selected DataFrames
+        joined_df = items_selected.join(orders_selected, "order_id")
 
         metrics_df = (
             joined_df.groupBy("order_date")
@@ -484,7 +488,7 @@ def run_transformation_task():
         if not all([orders_df, items_df]):
             raise Exception("Failed to transform data")
 
-        # Calculate metrics using the working KPI calculation approach
+        # Calculate metrics with the fixed functions
         category_metrics_df = calculate_category_metrics(items_df, orders_df, products_df)
         order_metrics_df = calculate_order_metrics(items_df, orders_df)
 
