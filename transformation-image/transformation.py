@@ -266,7 +266,7 @@ def load_data_from_s3(spark, bucket_name, files_to_process):
         items_paths = [f"s3a://{bucket_name}/{file}" for file in files_to_process['order_items']]
         products_paths = [f"s3a://{bucket_name}/{file}" for file in files_to_process['products']]
         
-        # Load data with union for multiple files
+        # Load data with union for multiple files - cache orders and items as they're used multiple times
         orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_paths).cache()
         items_df = spark.read.option("header", "true").option("inferSchema", "true").csv(items_paths).cache()
         products_df = spark.read.option("header", "true").option("inferSchema", "true").csv(products_paths)
@@ -326,7 +326,7 @@ def calculate_category_metrics(items_df, orders_df, products_df):
         return None
 
 def calculate_order_metrics(items_df, orders_df):
-    """Calculate order-level metrics"""
+    """Calculate order-level metrics - using the working approach from your code"""
     try:
         joined_df = (
             items_df
@@ -334,7 +334,7 @@ def calculate_order_metrics(items_df, orders_df):
             .select(
                 "order_date",
                 "order_id",
-                "user_id",
+                "user_id",  # This works with your data schema
                 col("id").alias("item_id"),
                 "sale_price",
                 when(col("status") == "returned", 1).otherwise(0).alias("is_returned")
@@ -484,7 +484,7 @@ def run_transformation_task():
         if not all([orders_df, items_df]):
             raise Exception("Failed to transform data")
 
-        # Calculate metrics
+        # Calculate metrics using the working KPI calculation approach
         category_metrics_df = calculate_category_metrics(items_df, orders_df, products_df)
         order_metrics_df = calculate_order_metrics(items_df, orders_df)
 
