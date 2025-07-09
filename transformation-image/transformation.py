@@ -78,7 +78,7 @@ def send_task_failure(task_token, error_message):
 
 def get_environment_variables():
     """Get required environment variables from ECS task"""
-    required_vars = ['TASK_TOKEN', 'FILE_KEY', 'EXECUTION_ID', 'BUCKET_NAME']
+    required_vars = ['TASK_TOKEN', 'EXECUTION_ID', 'BUCKET_NAME']
     env_vars = {}
     
     for var in required_vars:
@@ -86,6 +86,9 @@ def get_environment_variables():
         if not value:
             raise ValueError(f"Required environment variable {var} not found")
         env_vars[var] = value
+    
+    # FILE_KEY is optional - default to empty string for multi-file processing
+    env_vars['FILE_KEY'] = os.environ.get('FILE_KEY', '')
     
     # Optional validation metadata
     validation_metadata = os.environ.get('VALIDATION_METADATA')
@@ -167,12 +170,13 @@ def get_files_from_folder(bucket_name, folder_path):
     files_to_process = {}
     
     try:
-        # If folder_path doesn't end with '/', add it
-        if not folder_path.endswith('/'):
-            folder_path += '/'
+        # Handle empty folder_path for root-level processing
+        base_prefix = folder_path if folder_path and not folder_path.endswith('/') else folder_path
+        if base_prefix and not base_prefix.endswith('/'):
+            base_prefix += '/'
         
         for data_type, path in DATA_PATHS.items():
-            full_path = folder_path + path
+            full_path = base_prefix + path
             logger.info(f"Looking for {data_type} files in: {full_path}")
             
             response = s3_client.list_objects_v2(
