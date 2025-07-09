@@ -9,9 +9,41 @@ on:
       - main
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+
+      - name: Run validation tests
+        run: |
+          echo "Running validation script tests..."
+          pytest tests/test_validation.py -v
+
+      - name: Run transformation tests
+        run: |
+          echo "Running transformation script tests..."
+          pytest tests/test_transformation.py -v
+
+      - name: Run all tests with coverage
+        run: |
+          echo "Running all tests..."
+          pytest tests/ -v --tb=short
+
   build-and-deploy:
     runs-on: ubuntu-latest
+    needs: test
     environment: production
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v3
 
@@ -32,13 +64,22 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: 'us-east-1'
 
+      - name: Deploy Step Function
+        run: |
+          echo "Deploying Step Functions state machine..."
+          aws stepfunctions update-state-machine \
+            --state-machine-arn arn:aws:states:us-east-1:643303011741:stateMachine:ecsJob \
+            --definition file://stepfunction.json
+          echo "Step Functions deployment completed"
+
       - name: Wait for ECS Cluster
         run: |
+          echo "Waiting for ECS cluster to be ready..."
           until aws ecs describe-clusters --cluster ecr-dynamo-project --region us-east-1 | grep -q '"status": "ACTIVE"'; do
             echo "Waiting for ECS cluster ecr-dynamo-project to be ready..."
             sleep 10
           done
-          echo "ECS cluster is ready!"
+          echo "ECS cluster is ready"
 
       - name: Log in to Amazon ECR
         id: login-ecr
@@ -46,19 +87,27 @@ jobs:
         with:
           region: us-east-1
 
-      - name: Debug ECR URI
-        run: |
-          echo "ECR URI for validation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest"
-          echo "ECR URI for transformation: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest"
-
       - name: Build and push validation image
         run: |
+          echo "Building and pushing validation image..."
           docker build -t validation-ecr:latest -f validation-image/Dockerfile .
           docker tag validation-ecr:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/validation/ecr:latest
+          echo "Validation image deployed"
 
       - name: Build and push transformation image
         run: |
+          echo "Building and pushing transformation image..."
           docker build -t transformation-ecr:latest -f transformation-image/Dockerfile .
           docker tag transformation-ecr:latest ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest
           docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.us-east-1.amazonaws.com/transformation/ecr:latest
+          echo "Transformation image deployed"
+
+      - name: Deployment Summary
+        run: |
+          echo "Deployment Summary:"
+          echo "- Tests passed"
+          echo "- Step Functions updated"
+          echo "- Docker images built and pushed to ECR"
+          echo ""
+          echo "E-commerce data processing pipeline deployment completed"
