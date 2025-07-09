@@ -1,395 +1,391 @@
-# E-commerce Data Processing Pipeline - Comprehensive Documentation
+# E-commerce Data Processing Pipeline
+## Executive Summary & Quick Start
 
-## Table of Contents
+### System Overview
+An event-driven, serverless AWS data processing pipeline that validates, transforms, and analyzes e-commerce data with built-in concurrency control and automated workflows.
 
-- Project Overview
-- Architecture
-- Components
-- Setup and Deployment
-- Configuration
-- Usage
-- Testing
-- Monitoring and Troubleshooting
-- File Structure
-- API Reference
-
-## Project Overview
-
-### Description
-
-The E-commerce Pipeline is an event-driven, serverless data processing workflow on AWS designed to validate and transform e-commerce transactional data (orders, order items, and products), compute key performance indicators (KPIs), and store results in DynamoDB. The pipeline is triggered by S3 events, processes data through a series of validation and transformation steps using ECS Fargate tasks, archives data in S3, and sends notifications via SNS. The entire workflow is orchestrated using AWS Step Functions, ensuring reliability, error handling, and monitoring.
-
-### Objectives
-
-- **Validate Data**: Ensure incoming e-commerce data (products, orders, order items) meets predefined schema criteria.
-- **Transform Data**: Compute category-level and order-level KPIs from validated data using Apache Spark.
-- **Store Results**: Save computed KPIs to DynamoDB for downstream analytics.
-- **Archive Data**: Move processed or invalid data to appropriate S3 prefixes for archival.
-- **Notify Stakeholders**: Send success or failure notifications via SNS.
-### Key Features
-
-- **Automated File Processing**: Triggers when all required files (orders, order_items, products) are uploaded to S3
-- **Concurrency Control**: Prevents overlapping executions using DynamoDB locks
-- **Data Validation**: Schema validation and file quarantine for invalid data
-- **Spark-based Transformation**: Scalable data processing with Apache Spark
-- **Metrics Generation**: Category and order-level analytics stored in DynamoDB
-- **File Archival**: Automatic archival of processed files
-- **CI/CD Pipeline**: Automated testing and deployment via GitHub Actions
+### Key Capabilities
+- **Automated Processing**: Triggers on S3 file uploads
+- **Concurrent Execution Control**: DynamoDB-based locking mechanism
+- **Scalable Processing**: Apache Spark + ECS Fargate
+- **Real-time Analytics**: Category and order-level KPIs
+- **Automated Archival**: S3-based data lifecycle management
 
 ### Technology Stack
+| Component | Technology | Purpose |
+|-----------|------------|---------|
+| Orchestration | AWS Step Functions | Workflow coordination |
+| Processing | ECS Fargate + Apache Spark | Data transformation |
+| Storage | DynamoDB + S3 | Metrics & file storage |
+| Monitoring | CloudWatch + SNS | Logging & notifications |
+| CI/CD | GitHub Actions | Automated deployment |
 
-- AWS Step Functions: Workflow orchestration
-- AWS ECS Fargate: Containerized data processing
-- Apache Spark: Large-scale data transformation
-- Amazon DynamoDB: Metrics storage and concurrency control
-- Amazon S3: Data storage and archival
-- Amazon ECR: Container image registry
-- AWS Lambda: File aggregation logic
-- Amazon SNS: Notifications
-- GitHub Actions: CI/CD automation
+---
 
-## Architecture
+## Architecture & Data Flow
 
 ### High-Level Architecture
 ![](images/architecture_diagram.svg)
-### Step Function Architecture
+
+### Concurrent Processing Flow
+
+#### Phase 1: File Detection & Aggregation
+```
+S3 Events (Parallel) -> Lambda Aggregator -> Completeness Check
+├── orders/*.csv
+├── order_items/*.csv
+└── products.csv
+```
+
+#### Phase 2: Workflow Orchestration
+```
+Step Functions Execution
+├── Acquire Lock (Atomic)
+├── Validate Files (Parallel Schema Check)
+├── Transform Data (Spark Processing)
+├── Store Results (Batch Write)
+└── Release Lock & Notify
+```
 ![](images/step_function.png)
-### Data Flow
 
-1. **File Upload**: CSV files uploaded to S3 bucket 
-2. **File Aggregation**: Lambda function checks for complete file set
-3. **Workflow Trigger**: Step Functions execution starts when all files present
-4. **Concurrency Control**: DynamoDB lock acquired to prevent overlapping processing
-5. **Validation**: ECS task validates file schemas and quarantines invalid files
-6. **Transformation**: ECS task processes data using Spark and calculates metrics
-7. **Storage**: Metrics stored in DynamoDB tables
-8. **Archival**: Processed files moved to archive bucket
-9. **Notification**: SNS alerts sent on success/failure
+#### Phase 3: Data Processing (Concurrent)
+```
+Validation Task               Transformation Task
+├── Schema Validation       ├── Data Loading
+├── File Quarantine         ├── KPI Calculation
+└── Result Generation       └── DynamoDB Storage
+```
 
-### Concurrency Control
+---
 
-The pipeline implements a distributed semaphore pattern using DynamoDB to ensure only one execution processes files at a time:
+## Core Components
 
-- Lock acquisition before processing
-- Automatic retry mechanism for waiting executions
-- Lock release on completion or failure
-- Prevents data corruption and duplicate processing
+### 1. Concurrency Control System
 
-## Components
-
-### 1. Step Functions State Machine
-
-**Purpose**: Orchestrates the entire data processing workflow
-
-**States**:
-
-- AcquireLock: Obtains processing lock from DynamoDB
-- ValidateFile: Runs validation ECS task
-- CheckValidationResult: Routes based on validation outcome
-- TransformData: Runs transformation ECS task
-- ReleaseLockAndNotifySuccess: Releases lock and sends success notification
-- ReleaseLockAndNotifyFailure: Releases lock and sends failure notification
-
-**Configuration**:
+**Lock Management**
+- **Table**: `ProcessingLockTable`
+- **Mechanism**: Atomic conditional updates
+- **Strategy**: Single-writer, multiple-reader pattern
 
 ```json
 {
-  "Comment": "Enhanced E-commerce Pipeline - ECS + Concurrency Control + Essential SNS Notifications",
-  "StartAt": "AcquireLock"
+  "LockId": "ecommerce-pipeline-lock",
+  "currentlockcount": 0,
+  "execution_metadata": {
+    "execution_id": "timestamp"
+  }
 }
 ```
 
-### 2. Lambda File Aggregator
+**Lock Acquisition Flow**
+1. Check current lock count
+2. Conditional increment if available
+3. Store execution metadata
+4. Process data
+5. Release lock atomically
 
-**Purpose**: Monitors S3 uploads and triggers Step Functions when complete dataset is available
+### 2. File Processing Pipeline
 
-**Functionality**:
+**Input Requirements**
+| File Type | Location | Schema | Example |
+|-----------|----------|---------|---------|
+| Orders | `orders/` | `order_id, user_id, order_date, total_amount, status` | `1, 1001, 2025-07-07, 150.00, completed` |
+| Order Items | `order_items/` | `order_id, product_id, quantity, unit_price` | `1, 2001, 2, 75.00` |
+| Products | `products/` | `product_id, category, name, price` | `2001, Electronics, Smartphone, 150.00` |
 
-- Checks for files in all three required folders (orders/, order_items/, products/)
-- Only triggers Step Functions when all file types are present
-- Provides detailed logging of file status
+**Processing States**
+- **Incoming**: Raw uploaded files
+- **Processing**: Files under validation/transformation
+- **Quarantine**: Invalid files
+- **Archive**: Successfully processed files
 
-**Trigger**: S3 events for uploads to specific prefixes
+### 3. Analytics Engine
 
-### 3. Validation Container (ECS Task)
+**Category-Level KPIs** (`CategoryKPIs` Table)
+```json
+{
+  "category": "Electronics",
+  "order_date": "2025-07-07",
+  "daily_revenue": 15000.00,
+  "avg_order_value": 125.50,
+  "avg_return_rate": 0.05
+}
+```
 
-**Purpose**: Validates CSV file schemas and quarantines invalid files
+**Order-Level KPIs** (`OrderKPIs` Table)
+```json
+{
+  "order_date": "2025-07-07",
+  "total_orders": 150,
+  "total_revenue": 18750.00,
+  "total_items_sold": 300,
+  "return_rate": 0.03,
+  "unique_customers": 120
+}
+```
 
-**Schema Requirements**:
+### 4. Container Architecture
 
-- Orders: order_id, user_id, created_at, status
-- Order Items: id, order_id, product_id, sale_price
-- Products: id, sku, cost, category, retail_price
+**Validation Container**
+- **Purpose**: Schema validation and quarantine
+- **Runtime**: Python + pandas
+- **Output**: Validation metadata for next stage
 
-**Outputs**:
+**Transformation Container**
+- **Purpose**: Data processing and analytics
+- **Runtime**: Apache Spark + Python
+- **Output**: Computed KPIs to DynamoDB
 
-- Valid files remain in processing folders
-- Invalid files moved to quarantine folders
-- Validation results passed to transformation step
+---
 
-### 4. Transformation Container (ECS Task)
+## Configuration & Deployment
 
-**Purpose**: Processes data using Apache Spark and calculates business metrics
+### Environment Setup
 
-**Data Processing**:
+#### Prerequisites Checklist
+- [ ] AWS Account with appropriate permissions
+- [ ] GitHub repository configured
+- [ ] Docker installed locally
+- [ ] AWS CLI configured
 
-- Loads CSV files from S3 using Spark
-- Performs data type conversions and joins
-- Calculates category and order-level metrics
-- Writes results to DynamoDB tables
+#### Infrastructure Setup (Parallel Execution)
 
-**Metrics Calculated**:
+**S3 Buckets**
+```bash
+# Data bucket
+aws s3 mb s3://ecommerce-data-bucket --region us-east-1
 
-- **Category Metrics**: Daily revenue, average order value, return rate by category
-- **Order Metrics**: Total orders, revenue, items sold, return rate, unique customers
+# Archive bucket
+aws s3 mb s3://ecommerce-archive-bucket --region us-east-1
+```
 
-### 5. DynamoDB Tables
+**ECR Repositories**
+```bash
+# Validation container
+aws ecr create-repository --repository-name validation/ecr --region us-east-1
 
-- **ProcessingLockTable**:
-  - **Purpose**: Concurrency control
-  - **Key**: LockId (String)
-  - **Attributes**: currentlockcount, execution IDs with timestamps
-- **category_metrics_table**:
-  - **Purpose**: Category-level analytics
-  - **Keys**: category (Hash), order_date (Range)
-  - **Metrics**: daily_revenue, avg_order_value, avg_return_rate
-- **order_metrics_table**:
-  - **Purpose**: Order-level analytics
-  - **Key**: order_date (Hash)
-  - **Metrics**: total_orders, total_revenue, total_items_sold, return_rate, unique_customers
+# Transformation container
+aws ecr create-repository --repository-name transformation/ecr --region us-east-1
+```
 
-## Setup and Deployment
+**DynamoDB Tables**
+```bash
+# Lock table
+aws dynamodb create-table \
+  --table-name ProcessingLockTable \
+  --attribute-definitions AttributeName=LockId,AttributeType=S \
+  --key-schema AttributeName=LockId,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
 
-### Prerequisites
+# Category metrics table
+aws dynamodb create-table \
+  --table-name CategoryKPIs \
+  --attribute-definitions \
+    AttributeName=category,AttributeType=S \
+    AttributeName=order_date,AttributeType=S \
+  --key-schema \
+    AttributeName=category,KeyType=HASH \
+    AttributeName=order_date,KeyType=RANGE \
+  --billing-mode PAY_PER_REQUEST
 
-- AWS Account with appropriate permissions
-- GitHub repository
-- Docker installed locally
-- AWS CLI configured
-
-### Initial Setup
-
-1. **Create S3 Buckets**
-
-   ```bash
-   aws s3 mb s3://bucket-name --region your-region
-   aws s3 mb s3://bucket-name --region your-region
-   ```
-2. **Create ECR Repositories**
-
-   ```bash
-   aws ecr create-repository --repository-name validation/ecr --region your-region
-   aws ecr create-repository --repository-name transformation/ecr --region your-region
-   ```
-3. **Create ECS Cluster**
-
-   ```bash
-   aws ecs create-cluster --cluster-name ecr-dynamo-project --region us-east-1
-   ```
-4. **Create DynamoDB Lock Table**
-
-   ```bash
-   aws dynamodb create-table \
-     --table-name ProcessingLockTable \
-     --attribute-definitions AttributeName=LockId,AttributeType=S \
-     --key-schema AttributeName=LockId,KeyType=HASH \
-     --billing-mode PAY_PER_REQUEST \
-     --region us-east-1
-   
-   # Initialize lock record
-   aws dynamodb put-item \
-     --table-name ProcessingLockTable \
-     --item '{"LockId": {"S": "ecommerce-pipeline-lock"}, "currentlockcount": {"N": "0"}}' \
-     --region us-east-1
-   ```
-5. **Create SNS Topic**
-
-   ```bash
-   aws sns create-topic --name ecommerce-etl-alerts --region us-east-1
-   ```
+# Order metrics table
+aws dynamodb create-table \
+  --table-name OrderKPIs \
+  --attribute-definitions AttributeName=order_date,AttributeType=S \
+  --key-schema AttributeName=order_date,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+```
 
 ### GitHub Secrets Configuration
 
-Set up the following secrets in your GitHub repository:
+| Secret | Description | Usage |
+|--------|-------------|-------|
+| `AWS_ACCESS_KEY_ID` | AWS access key | Deployment authentication |
+| `AWS_SECRET_ACCESS_KEY` | AWS secret key | Deployment authentication |
+| `AWS_ACCOUNT_ID` | AWS account ID | ECR/ECS resource access |
 
-| Secret Name | Description |
-| --- | --- |
-| AWS_ACCESS_KEY_ID | AWS access key for deployment |
-| AWS_SECRET_ACCESS_KEY | AWS secret key for deployment |
-| AWS_ACCOUNT_ID | Your AWS account ID |
+### CI/CD Pipeline
 
-### Automated Deployment
+**Automated Deployment Stages**
+1. **Test Phase**: Validation and transformation tests
+2. **Build Phase**: Container image builds
+3. **Deploy Phase**: Step Functions and ECS updates
+4. **Notify Phase**: Deployment status alerts
 
-The CI/CD pipeline automatically deploys changes when pushed to the main branch:
+---
 
-- **Tests**: Runs validation and transformation tests
-- **Step Functions**: Updates state machine definition
-- **ECR Images**: Builds and pushes container images
-- **Notifications**: Provides deployment summary
+## Operation & Monitoring
 
-## Configuration
+### Execution Modes
 
-### Environment Variables
+#### Automatic Execution
+- **Trigger**: S3 file uploads
+- **Condition**: Complete file set detection
+- **Concurrency**: Single active execution
 
-**Validation Container**:
-
-- TASK_TOKEN: Step Functions callback token
-- FILE_KEY: Input file path (empty for multi-file processing)
-- EXECUTION_ID: Step Functions execution name
-- BUCKET_NAME: S3 bucket name
-- AWS_REGION: AWS region
-- S3_ARCHIVE_BUCKET: Archive bucket name
-- LOG_LEVEL: Logging level
-
-**Transformation Container**:
-
-- All validation variables plus:
-- VALIDATION_METADATA: Results from validation step
-- S3_BUCKET: Data bucket name
-- ORDERS_PATH: Orders folder path
-- ORDER_ITEMS_PATH: Order items folder path
-- PRODUCTS_PATH: Products folder path
-- CATEGORY_METRICS_TABLE: Category metrics table name
-- ORDER_METRICS_TABLE: Order metrics table name
-- SPARK_APP_NAME: Spark application name
-- DYNAMODB_BATCH_SIZE: Batch size for DynamoDB writes
-- DYNAMODB_MAX_RETRIES: Maximum retry attempts
-
-### File Structure Requirements
-
-```
-s3://your-bucket/
-├── orders/
-│   └── orders_part1.csv
-├── order_items/
-│   └── order_items_part1.csv
-└── products/
-    └── products.csv
-```
-
-## Usage
-
-### Manual Execution
-
-Trigger the pipeline manually using AWS CLI:
-
+#### Manual Execution
 ```bash
 aws stepfunctions start-execution \
-  --state-machine-arn arn:aws:states:us-east-1:643303011741:stateMachine:ecsJob \
+  --state-machine-arn arn:aws:states:us-east-1:ACCOUNT:stateMachine:ecsJob \
   --name manual-execution-$(date +%s) \
-  --input '{
-    "fileKey": "",
-    "bucket": "ecs.data"
-  }'
+  --input '{"fileKey": "", "bucket": "ecommerce-data-bucket"}'
 ```
 
-### Automatic Execution
+### Monitoring Dashboard
 
-The pipeline automatically triggers when:
+#### Step Functions Monitoring
+- **Execution Status**: Success/failure rates
+- **State Duration**: Performance metrics per state
+- **Error Analysis**: Failure patterns and causes
 
-- Files are uploaded to any of the required S3 folders
-- Lambda function detects complete file set
-- Step Functions execution starts with concurrency control
-
-### Data Upload Process
-
-1. **Upload Files**: Place CSV files in appropriate S3 folders
-2. **Wait for Processing**: Lambda checks for complete set
-3. **Monitor Execution**: Check Step Functions console for progress
-4. **Review Results**: Check DynamoDB tables for metrics
-5. **Verify Archive**: Confirm files moved to archive bucket
-
-## Monitoring and Troubleshooting
-
-### Monitoring Tools
-
-- **Step Functions Console**:
-  - Execution status and history
-  - State-by-state execution details
-  - Error messages and stack traces
-- **CloudWatch Logs**:
-  - ECS task logs for validation and transformation
-  - Lambda function logs for file aggregation
-  - Detailed error information
-- **DynamoDB Console**:
-  - Lock table status
-  - Metrics data verification
-  - Query results for analysis
-
-### Common Issues and Solutions
-
-**Lock Acquisition Failures**
-
-- **Symptom**: ConditionalCheckFailedException in Step Functions
-- **Causes**:
-  - Missing DynamoDB lock table
-  - Uninitialized lock record
-  - Stuck lock from failed execution
-- **Solutions**:
-
-  ```bash
-  # Check lock table exists
-  aws dynamodb describe-table --table-name ProcessingLockTable
-  
-  # Reset stuck lock
-  aws dynamodb put-item \
-    --table-name ProcessingLockTable \
-    --item '{"LockId": {"S": "ecommerce-pipeline-lock"}, "currentlockcount": {"N": "0"}}'
-  ```
-
-**File Processing Errors**
-
-- **Symptom**: Validation or transformation failures
-- **Causes**:
-  - Invalid file schemas
-  - Missing required files
-  - Data type conversion errors
-- **Solutions**:
-  - Check CloudWatch logs for specific error messages
-  - Verify file schemas match requirements
-  - Ensure all three file types are present
-
-**Container Image Issues**
-
-- **Symptom**: ECS task failures
-- **Causes**:
-  - Image not found in ECR
-  - Incorrect task definition
-  - Resource constraints
-- **Solutions**:
-  - Verify ECR repository and image tags
-  - Check ECS task definition configuration
-  - Monitor resource utilization
-
-### Performance Optimization
-
-- **Spark Configuration**:
-  - Adjust partition sizes based on data volume
-  - Optimize memory allocation for containers
-  - Use appropriate instance types for ECS tasks
-- **DynamoDB Optimization**:
-  - Monitor read/write capacity usage
-  - Implement batch writing for large datasets
-  - Use appropriate partition keys for even distribution
-
-## File Structure
-
+#### CloudWatch Logs Structure
 ```
-project-root/
-├── .github/
-│   └── workflows/
-│       ├── ci-cd.yml                    # CI/CD pipeline
-│       └── requirements.txt             # Pipeline dependencies
-├── tests/
-│   ├── test_validation.py               # Validation tests
-│   └── test_transformation.py           # Transformation tests
-├── validation-image/
-│   ├── Dockerfile                       # Validation container
-│   └── validation.py                    # Validation script
-├── transformation-image/
-│   ├── Dockerfile                       # Transformation container
-│   └── transformation.py                # Transformation script
-├── lambda_function.py                    # File aggregation logic
-├── stepfunction.json                    # Step Functions definition
-└── requirements-test.txt                # Test dependencies
+/aws/ecs/validation-task     # Validation container logs
+/aws/ecs/transformation-task # Transformation container logs
+/aws/lambda/file-aggregator  # Lambda function logs
 ```
+
+#### DynamoDB Monitoring
+- **Lock Table**: Current lock status
+- **Metrics Tables**: Data volume and query patterns
+- **Performance**: Read/write capacity utilization
+
+### Troubleshooting Guide
+
+#### Common Issues Matrix
+
+| Issue | Symptoms | Root Cause | Solution |
+|-------|----------|------------|----------|
+| Lock Acquisition Failure | ConditionalCheckFailedException | Missing/stuck lock | Reset lock table |
+| Validation Failures | Files in quarantine | Schema mismatch | Verify file format |
+| Transformation Errors | Empty DynamoDB tables | Data processing issues | Check Spark logs |
+| Container Failures | ECS task failures | Resource constraints | Increase task resources |
+
+#### Performance Optimization
+
+**Spark Configuration**
+- Partition size optimization based on data volume
+- Memory allocation tuning for containers
+- Instance type selection for ECS tasks
+
+**DynamoDB Optimization**
+- Read/write capacity monitoring
+- Batch writing for large datasets
+- Partition key distribution analysis
+
+---
+
+## Testing & Quality Assurance
+
+### Test Structure
+```
+tests/
+├── unit/
+│   ├── test_validation.py      # Schema validation tests
+│   └── test_transformation.py  # Data processing tests
+├── integration/
+│   ├── test_workflow.py        # End-to-end tests
+│   └── test_concurrency.py     # Lock mechanism tests
+└── performance/
+    └── test_load.py            # Load testing
+```
+
+### Test Execution
+```bash
+# Run all tests
+python -m pytest tests/ -v
+
+# Run specific test category
+python -m pytest tests/unit/ -v
+python -m pytest tests/integration/ -v
+```
+
+---
+
+## File Structure & Resources
+
+### Project Organization
+```
+ecommerce-pipeline/
+├── .github/workflows/           # CI/CD configuration
+├── containers/
+│   ├── validation/
+│   │   ├── Dockerfile
+│   │   └── validation.py
+│   └── transformation/
+│       ├── Dockerfile
+│       └── transformation.py
+├── lambda/
+│   └── file_aggregator.py
+├── step-functions/
+│   └── state_machine.json
+├── tests/                       # Test suite
+├── docs/                        # Documentation
+└── scripts/                     # Deployment scripts
+```
+
+### Resource Allocation
+
+#### ECS Task Resources
+| Task Type | CPU | Memory | Storage |
+|-----------|-----|---------|---------|
+| Validation | 1024 | 2048 MB | 20 GB |
+| Transformation | 2048 | 4096 MB | 30 GB |
+
+#### DynamoDB Capacity
+| Table | Read Capacity | Write Capacity | Storage |
+|-------|---------------|----------------|---------|
+| Lock Table | On-demand | On-demand | < 1 GB |
+| Category KPIs | On-demand | On-demand | Variable |
+| Order KPIs | On-demand | On-demand | Variable |
+
+---
+
+## API Reference & Extensions
+
+### Step Functions API
+
+**Start Execution**
+```json
+{
+  "stateMachineArn": "arn:aws:states:region:account:stateMachine:ecsJob",
+  "name": "execution-name",
+  "input": "{\"fileKey\": \"\", \"bucket\": \"bucket-name\"}"
+}
+```
+
+**Execution Status**
+```json
+{
+  "executionArn": "arn:aws:states:region:account:execution:ecsJob:name",
+  "status": "SUCCEEDED|FAILED|RUNNING",
+  "startDate": "timestamp",
+  "stopDate": "timestamp"
+}
+```
+
+### Extension Points
+
+#### Integration Opportunities
+- Connect to BI tools (Tableau, PowerBI)
+- Implement API Gateway for metric queries
+- Add machine learning model integration
+
+---
+
+## Security & Compliance
+
+### IAM Roles & Permissions
+- **ECS Task Role**: S3, DynamoDB, Step Functions access
+- **Lambda Execution Role**: S3, Step Functions permissions
+- **Step Functions Role**: ECS, DynamoDB, SNS access
+
+### Data Security
+- **Encryption**: S3 server-side encryption
+- **Access Control**: IAM-based resource access
+- **Audit Trail**: CloudWatch logging for all operations
+
+### Compliance Considerations
+- **Data Retention**: Automated S3 lifecycle policies
+- **Privacy**: PII handling in transformation layer
+- **Monitoring**: Real-time alerting for security events
