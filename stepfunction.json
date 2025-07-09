@@ -1,0 +1,389 @@
+{
+  "Comment": "Enhanced E-commerce Pipeline - ECS + Concurrency Control + Essential SNS Notifications",
+  "StartAt": "AcquireLock",
+  "States": {
+    "AcquireLock": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::dynamodb:updateItem",
+      "Parameters": {
+        "TableName": "ProcessingLockTable",
+        "Key": {
+          "LockId": {
+            "S": "ecommerce-pipeline-lock"
+          }
+        },
+        "UpdateExpression": "SET currentlockcount = currentlockcount + :increase, #executionid = :locktime",
+        "ConditionExpression": "currentlockcount < :limit AND attribute_not_exists(#executionid)",
+        "ExpressionAttributeNames": {
+          "#executionid.$": "$$.Execution.Id"
+        },
+        "ExpressionAttributeValues": {
+          ":increase": {
+            "N": "1"
+          },
+          ":limit": {
+            "N": "1"
+          },
+          ":locktime": {
+            "S.$": "$$.State.EnteredTime"
+          }
+        }
+      },
+      "ResultPath": "$.lockResult",
+      "Retry": [
+        {
+          "ErrorEquals": [
+            "DynamoDB.ConditionalCheckFailedException"
+          ],
+          "IntervalSeconds": 5,
+          "MaxAttempts": 20,
+          "BackoffRate": 1.5
+        },
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "IntervalSeconds": 2,
+          "MaxAttempts": 3,
+          "BackoffRate": 2.0
+        }
+      ],
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "NotifyLockFailure",
+          "ResultPath": "$.lockError"
+        }
+      ],
+      "Next": "ValidateFile"
+    },
+    "ValidateFile": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
+      "Parameters": {
+        "TaskDefinition": "validation-job:1",
+        "Cluster": "ecr-dynamo-project",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-09ef5d2d13d4aade3",
+              "subnet-09960c98d9eb16e56",
+              "subnet-0b4101435207a8f0c",
+              "subnet-01e8a8e0e19aa6226",
+              "subnet-0bc4281b645a0f760",
+              "subnet-092e0b9b97b730c74"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "validation-container",
+              "Environment": [
+                {
+                  "Name": "TASK_TOKEN",
+                  "Value.$": "$$.Task.Token"
+                },
+                {
+                  "Name": "FILE_KEY",
+                  "Value.$": "$.fileKey"
+                },
+                {
+                  "Name": "EXECUTION_ID",
+                  "Value.$": "$$.Execution.Name"
+                },
+                {
+                  "Name": "BUCKET_NAME",
+                  "Value.$": "$.bucket"
+                },
+                {
+                  "Name": "AWS_REGION",
+                  "Value": "us-east-1"
+                },
+                {
+                  "Name": "S3_ARCHIVE_BUCKET",
+                  "Value": "ecs.archive"
+                },
+                {
+                  "Name": "LOG_LEVEL",
+                  "Value": "INFO"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ResultPath": "$.validationResult",
+      "TimeoutSeconds": 900,
+      "Next": "CheckValidationResult",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ReleaseLockAndNotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "CheckValidationResult": {
+      "Type": "Choice",
+      "Choices": [
+        {
+          "Variable": "$.validationResult.status",
+          "StringEquals": "success",
+          "Next": "TransformData"
+        },
+        {
+          "Variable": "$.validationResult.status",
+          "StringEquals": "partial_success",
+          "Next": "TransformData"
+        }
+      ],
+      "Default": "ReleaseLockAndNotifyFailure"
+    },
+    "TransformData": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::ecs:runTask.waitForTaskToken",
+      "Parameters": {
+        "TaskDefinition": "transformation-job:1",
+        "Cluster": "ecr-dynamo-project",
+        "LaunchType": "FARGATE",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "Subnets": [
+              "subnet-09ef5d2d13d4aade3",
+              "subnet-09960c98d9eb16e56",
+              "subnet-0b4101435207a8f0c",
+              "subnet-01e8a8e0e19aa6226",
+              "subnet-0bc4281b645a0f760",
+              "subnet-092e0b9b97b730c74"
+            ],
+            "AssignPublicIp": "ENABLED"
+          }
+        },
+        "Overrides": {
+          "ContainerOverrides": [
+            {
+              "Name": "transformation-container",
+              "Environment": [
+                {
+                  "Name": "TASK_TOKEN",
+                  "Value.$": "$$.Task.Token"
+                },
+                {
+                  "Name": "FILE_KEY",
+                  "Value.$": "$.fileKey"
+                },
+                {
+                  "Name": "EXECUTION_ID",
+                  "Value.$": "$$.Execution.Name"
+                },
+                {
+                  "Name": "BUCKET_NAME",
+                  "Value.$": "$.bucket"
+                },
+                {
+                  "Name": "VALIDATION_METADATA",
+                  "Value.$": "States.JsonToString($.validationResult)"
+                },
+                {
+                  "Name": "AWS_REGION",
+                  "Value": "us-east-1"
+                },
+                {
+                  "Name": "S3_BUCKET",
+                  "Value": "ecs.data"
+                },
+                {
+                  "Name": "S3_ARCHIVE_BUCKET",
+                  "Value": "ecs.archive"
+                },
+                {
+                  "Name": "LOG_LEVEL",
+                  "Value": "INFO"
+                },
+                {
+                  "Name": "ORDERS_PATH",
+                  "Value": "orders/"
+                },
+                {
+                  "Name": "ORDER_ITEMS_PATH",
+                  "Value": "order_items/"
+                },
+                {
+                  "Name": "PRODUCTS_PATH",
+                  "Value": "products/"
+                },
+                {
+                  "Name": "CATEGORY_METRICS_TABLE",
+                  "Value": "category_metrics_table"
+                },
+                {
+                  "Name": "ORDER_METRICS_TABLE",
+                  "Value": "order_metrics_table"
+                },
+                {
+                  "Name": "SPARK_APP_NAME",
+                  "Value": "ECSAnalytics"
+                },
+                {
+                  "Name": "DYNAMODB_BATCH_SIZE",
+                  "Value": "25"
+                },
+                {
+                  "Name": "DYNAMODB_MAX_RETRIES",
+                  "Value": "3"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "ResultPath": "$.transformationResult",
+      "TimeoutSeconds": 1200,
+      "Next": "ReleaseLockAndNotifySuccess",
+      "Catch": [
+        {
+          "ErrorEquals": [
+            "States.ALL"
+          ],
+          "Next": "ReleaseLockAndNotifyFailure",
+          "ResultPath": "$.error"
+        }
+      ]
+    },
+    "ReleaseLockAndNotifySuccess": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "ReleaseLock",
+          "States": {
+            "ReleaseLock": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "ProcessingLockTable",
+                "Key": {
+                  "LockId": {
+                    "S": "ecommerce-pipeline-lock"
+                  }
+                },
+                "UpdateExpression": "SET currentlockcount = currentlockcount - :decrease REMOVE #executionid",
+                "ConditionExpression": "attribute_exists(#executionid)",
+                "ExpressionAttributeNames": {
+                  "#executionid.$": "$$.Execution.Id"
+                },
+                "ExpressionAttributeValues": {
+                  ":decrease": {
+                    "N": "1"
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "NotifySuccess",
+          "States": {
+            "NotifySuccess": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:us-east-1:643303011741:ecommerce-etl-alerts",
+                "Subject": "Pipeline Success",
+                "Message.$": "States.Format('SUCCESS: Execution {} - Folder {} processed successfully. Validation Results: Total files: {}, Passed: {}, Failed: {}, Quarantined: {}. Transformation Results: Records processed: {}, Category metrics: {}, Order metrics: {}, Failed records: {}, Archive status: {}', $$.Execution.Name, $.fileKey, $.validationResult.validation_results.total_files, $.validationResult.validation_results.passed, $.validationResult.validation_results.failed, $.validationResult.validation_results.quarantined, $.transformationResult.recordsProcessed, $.transformationResult.categoryMetrics, $.transformationResult.orderMetrics, $.transformationResult.failedRecords, $.transformationResult.archiveStatus)"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "End": true
+    },
+    "ReleaseLockAndNotifyFailure": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "ReleaseLockOnFailure",
+          "States": {
+            "ReleaseLockOnFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::dynamodb:updateItem",
+              "Parameters": {
+                "TableName": "ProcessingLockTable",
+                "Key": {
+                  "LockId": {
+                    "S": "ecommerce-pipeline-lock"
+                  }
+                },
+                "UpdateExpression": "SET currentlockcount = currentlockcount - :decrease REMOVE #executionid",
+                "ConditionExpression": "attribute_exists(#executionid)",
+                "ExpressionAttributeNames": {
+                  "#executionid.$": "$$.Execution.Id"
+                },
+                "ExpressionAttributeValues": {
+                  ":decrease": {
+                    "N": "1"
+                  }
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "States.ALL"
+                  ],
+                  "IntervalSeconds": 1,
+                  "MaxAttempts": 3,
+                  "BackoffRate": 2.0
+                }
+              ],
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "NotifyFailure",
+          "States": {
+            "NotifyFailure": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:us-east-1:643303011741:ecommerce-etl-alerts",
+                "Subject": "Pipeline Failure",
+                "Message.$": "States.Format('FAILURE: Execution {} - Folder {} failed processing. Error Details: {}', $$.Execution.Name, $.fileKey, $.error.Cause)"
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "End": true
+    },
+    "NotifyLockFailure": {
+      "Type": "Task",
+      "Resource": "arn:aws:states:::sns:publish",
+      "Parameters": {
+        "TopicArn": "arn:aws:sns:us-east-1:643303011741:ecommerce-etl-alerts",
+        "Subject": "Pipeline Lock Acquisition Failure",
+        "Message.$": "States.Format('LOCK FAILURE: Execution {} - Could not acquire processing lock after maximum retries. This indicates high concurrency or a stuck lock. Error Details: {}', $$.Execution.Name, $.lockError.Cause)"
+      },
+      "End": true
+    }
+  }
+}
