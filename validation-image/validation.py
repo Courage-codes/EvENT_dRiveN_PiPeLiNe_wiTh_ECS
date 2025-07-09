@@ -1,9 +1,10 @@
 import logging
 import boto3
+import json
+import os
 from botocore.exceptions import ClientError
 from io import StringIO
 import csv
-import json
 
 # Configure logging
 logging.basicConfig(level=logging.INFO,
@@ -13,6 +14,11 @@ logger = logging.getLogger(__name__)
 # AWS Configuration
 AWS_REGION = 'us-east-1'
 S3_BUCKET = 'ecs.data'
+
+# Get environment variables from Step Functions
+TASK_TOKEN = os.environ.get('TASK_TOKEN')
+FILE_KEY = os.environ.get('FILE_KEY')
+EXECUTION_ID = os.environ.get('EXECUTION_ID')
 
 # S3 Folder Paths
 FOLDERS = {
@@ -34,13 +40,35 @@ SCHEMAS = {
     'products': ['id', 'sku', 'cost', 'category', 'retail_price']
 }
 
-# Initialize S3 client
+# Initialize AWS clients
 s3_client = boto3.client('s3', region_name=AWS_REGION)
+stepfunctions_client = boto3.client('stepfunctions', region_name=AWS_REGION)
+
+def send_task_success(output):
+    """Send success callback to Step Functions"""
+    try:
+        stepfunctions_client.send_task_success(
+            taskToken=TASK_TOKEN,
+            output=json.dumps(output)
+        )
+        logger.info("Task success sent to Step Functions")
+    except Exception as e:
+        logger.error(f"Error sending task success: {e}")
+
+def send_task_failure(error, cause):
+    """Send failure callback to Step Functions"""
+    try:
+        stepfunctions_client.send_task_failure(
+            taskToken=TASK_TOKEN,
+            error=error,
+            cause=cause
+        )
+        logger.error(f"Task failure sent to Step Functions: {error}")
+    except Exception as e:
+        logger.error(f"Error sending task failure: {e}")
 
 def list_s3_files(bucket_name, prefix):
-    """
-    List all CSV files in an S3 folder.
-    """
+    """List all CSV files in an S3 folder."""
     try:
         logger.info(f"Listing files in s3://{bucket_name}/{prefix}")
         response = s3_client.list_objects_v2(
@@ -66,15 +94,11 @@ def list_s3_files(bucket_name, prefix):
         logger.error(f"Error listing files in s3://{bucket_name}/{prefix}: {e}")
         return []
 
-
 def read_s3_file_header(bucket_name, key):
-    """
-    Read only the header (first row) of a CSV file from S3.
-    """
+    """Read only the header (first row) of a CSV file from S3."""
     try:
         logger.info(f"Reading header from s3://{bucket_name}/{key}")
         
-        # Get the first few bytes to read just the header
         response = s3_client.get_object(
             Bucket=bucket_name,
             Key=key,
@@ -82,11 +106,8 @@ def read_s3_file_header(bucket_name, key):
         )
         
         content = response['Body'].read().decode('utf-8')
-        
-        # Find the first line (header)
         first_line = content.split('\n')[0].strip()
         
-        # Parse CSV header properly
         csv_reader = csv.reader(StringIO(first_line))
         headers = next(csv_reader)
         headers = [col.strip() for col in headers]
@@ -102,9 +123,7 @@ def read_s3_file_header(bucket_name, key):
         return None
 
 def validate_schema(headers, schema_name):
-    """
-    Validate headers against a specific schema.
-    """
+    """Validate headers against a specific schema."""
     logger.info(f"Validating {schema_name} schema")
     
     validation_result = {
@@ -136,11 +155,8 @@ def validate_schema(headers, schema_name):
     return validation_result
 
 def move_file_to_quarantine(bucket_name, source_key, quarantine_prefix):
-    """
-    Move a file from source location to quarantine folder.
-    """
+    """Move a file from source location to quarantine folder."""
     try:
-        # Extract filename from source key
         filename = source_key.split('/')[-1]
         quarantine_key = quarantine_prefix + filename
         
@@ -166,11 +182,22 @@ def move_file_to_quarantine(bucket_name, source_key, quarantine_prefix):
         logger.error(f"Error moving file to quarantine: {e}")
         return False
 
+def determine_folder_type(file_key):
+    """Determine which folder type based on the file key."""
+    if file_key.endswith('/'):
+        # It's a folder path, extract folder name
+        folder_path = file_key.rstrip('/')
+        folder_name = folder_path.split('/')[-1]
+        return folder_name if folder_name in FOLDERS else None
+    else:
+        # It's a file path, determine from the path
+        for folder_name, folder_prefix in FOLDERS.items():
+            if file_key.startswith(folder_prefix):
+                return folder_name
+        return None
 
 def process_folder(bucket_name, folder_name):
-    """
-    Process all files in a specific folder.
-    """
+    """Process all files in a specific folder."""
     logger.info(f"Processing folder: {folder_name}")
     
     folder_prefix = FOLDERS[folder_name]
@@ -201,7 +228,7 @@ def process_folder(bucket_name, folder_name):
         logger.info(f"Processing file: {file_key}")
         
         file_result = {
-            'file_name': file_key,
+            'file_key': file_key,
             'status': 'unknown',
             'issues': []
         }
@@ -226,9 +253,7 @@ def process_folder(bucket_name, folder_name):
             # Move to quarantine
             if move_file_to_quarantine(bucket_name, file_key, quarantine_prefix):
                 results['quarantined'] += 1
-                file_result['quarantined'] = True
-            else:
-                file_result['quarantined'] = False
+                file_result['status'] = 'quarantined'
         
         results['processed_files'].append(file_result)
     
@@ -241,147 +266,60 @@ def process_folder(bucket_name, folder_name):
     
     return results
 
-
 def main():
-    """
-    Main function to validate all files in all folders.
-    """
+    """Main function to validate files and send results to Step Functions."""
     logger.info("Starting S3 file validation process")
+    logger.info(f"Execution ID: {EXECUTION_ID}")
+    logger.info(f"File Key: {FILE_KEY}")
     
-    overall_results = {
-        'total_files': 0,
-        'passed': 0,
-        'failed': 0,
-        'quarantined': 0,
-        'folder_results': {}
-    }
-    
-    # Process each folder
-    for folder_name in FOLDERS.keys():
-        try:
-            results = process_folder(S3_BUCKET, folder_name)
-            overall_results['folder_results'][folder_name] = results
-            
-            if results:
-                overall_results['total_files'] += results['total_files']
-                overall_results['passed'] += results['passed']
-                overall_results['failed'] += results['failed']
-                overall_results['quarantined'] += results['quarantined']
-        except Exception as e:
-            logger.error(f"Error processing folder {folder_name}: {e}")
-            overall_results['folder_results'][folder_name] = {
-                'error': str(e),
-                'total_files': 0,
-                'passed': 0,
-                'failed': 0,
-                'quarantined': 0
-            }
-    
-    # Final summary
-    logger.info("="*50)
-    logger.info("VALIDATION PROCESS COMPLETE")
-    logger.info("="*50)
-    logger.info(f"Total files processed: {overall_results['total_files']}")
-    logger.info(f"Files passed validation: {overall_results['passed']}")
-    logger.info(f"Files failed validation: {overall_results['failed']}")
-    logger.info(f"Files moved to quarantine: {overall_results['quarantined']}")
-    logger.info("="*50)
-    
-    # Determine overall success and create response
-    success = overall_results['failed'] == 0 and overall_results['total_files'] > 0
-    
-    # Determine status code and message
-    if overall_results['total_files'] == 0:
-        status_code = 204  # No Content
-        message = "No files found to process"
-    elif overall_results['failed'] == 0:
-        status_code = 200  # Success
-        message = f"All {overall_results['total_files']} files passed validation successfully"
-    elif overall_results['passed'] > 0:
-        status_code = 206  # Partial Content
-        message = f"{overall_results['failed']} out of {overall_results['total_files']} files failed validation and were quarantined"
-    else:
-        status_code = 400  # Bad Request
-        message = f"All {overall_results['total_files']} files failed validation"
-    
-    response = {
-        'statusCode': status_code,
-        'success': success,
-        'message': message,
-        'results': {
-            'total_files': overall_results['total_files'],
-            'passed': overall_results['passed'],
-            'failed': overall_results['failed'],
-            'quarantined': overall_results['quarantined'],
-            'success_rate': round((overall_results['passed'] / overall_results['total_files'] * 100), 2) if overall_results['total_files'] > 0 else 0
-        },
-        'folder_details': overall_results['folder_results']
-    }
-    
-    logger.info(f"Lambda response: {json.dumps(response, indent=2)}")
-    return response
-
-
-def lambda_handler(event, context):
-    """
-    AWS Lambda handler for Step Functions integration.
-    """
     try:
-        logger.info(f"Lambda started with event: {json.dumps(event)}")
-        logger.info(f"Lambda context: {context}")
+        # Determine which folder to process
+        folder_name = determine_folder_type(FILE_KEY)
         
-        # Extract any parameters from event if needed
-        bucket_override = event.get('bucket', S3_BUCKET)
-        if bucket_override != S3_BUCKET:
-            global S3_BUCKET
-            S3_BUCKET = bucket_override
-            logger.info(f"Using bucket override: {S3_BUCKET}")
+        if not folder_name:
+            error_msg = f"Could not determine folder type from file key: {FILE_KEY}"
+            logger.error(error_msg)
+            send_task_failure("ValidationError", error_msg)
+            return
         
-        # Run the main validation process
-        result = main()
+        logger.info(f"Processing folder type: {folder_name}")
         
-        # Add execution metadata
-        result['execution_info'] = {
-            'request_id': context.aws_request_id if context else 'local-execution',
-            'function_name': context.function_name if context else 'local-function',
-            'function_version': context.function_version if context else 'local-version',
-            'remaining_time_ms': context.get_remaining_time_in_millis() if context else None
+        # Process the folder
+        results = process_folder(S3_BUCKET, folder_name)
+        
+        # Prepare metadata for Step Functions
+        metadata = {
+            'folder_type': folder_name,
+            'validation_results': results,
+            'execution_id': EXECUTION_ID,
+            'timestamp': str(boto3.Session().region_name)
         }
         
-        logger.info("Lambda execution completed successfully")
-        return result
+        # Check if validation was successful overall
+        if results['failed'] > 0:
+            logger.warning(f"Validation completed with {results['failed']} failed files")
+            # Still send success but with warning metadata
+            metadata['status'] = 'partial_success'
+            metadata['warning'] = f"{results['failed']} files failed validation and were quarantined"
+        else:
+            metadata['status'] = 'success'
+        
+        # Send success to Step Functions
+        send_task_success(metadata)
+        
+        logger.info("="*50)
+        logger.info("VALIDATION PROCESS COMPLETE")
+        logger.info("="*50)
+        logger.info(f"Total files processed: {results['total_files']}")
+        logger.info(f"Files passed validation: {results['passed']}")
+        logger.info(f"Files failed validation: {results['failed']}")
+        logger.info(f"Files moved to quarantine: {results['quarantined']}")
+        logger.info("="*50)
         
     except Exception as e:
-        error_message = f"Validation process failed: {str(e)}"
-        logger.error(error_message, exc_info=True)
-        
-        error_response = {
-            'statusCode': 500,
-            'success': False,
-            'message': error_message,
-            'results': None,
-            'execution_info': {
-                'request_id': context.aws_request_id if context else 'local-execution',
-                'function_name': context.function_name if context else 'local-function',
-                'error': str(e)
-            }
-        }
-        
-        return error_response
-
+        error_msg = f"Unexpected error during validation: {str(e)}"
+        logger.error(error_msg)
+        send_task_failure("ValidationError", error_msg)
 
 if __name__ == "__main__":
-    # For local testing
-    class MockContext:
-        aws_request_id = "local-test-123"
-        function_name = "s3-file-validator"
-        function_version = "1.0"
-        
-        def get_remaining_time_in_millis(self):
-            return 30000
-    
-    # Test the lambda handler
-    test_event = {}
-    test_context = MockContext()
-    result = lambda_handler(test_event, test_context)
-    print(json.dumps(result, indent=2))
+    main()
