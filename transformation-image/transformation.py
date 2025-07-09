@@ -364,7 +364,7 @@ def calculate_order_metrics(items_df, orders_df):
         return None
 
 def write_metrics_to_dynamodb(spark_df, table_name, primary_keys):
-    """Generic function to write metrics to DynamoDB with retry logic"""
+    """Generic function to write metrics to DynamoDB with retry logic - FIXED VERSION"""
     logger.info(f"Writing metrics to DynamoDB table: {table_name}")
     
     # Dynamic partitioning based on data size
@@ -435,7 +435,8 @@ def write_metrics_to_dynamodb(spark_df, table_name, primary_keys):
         if batch_items:
             write_batch(batch_items)
 
-        return successful_items, failed_items
+        # CRITICAL FIX: Yield the tuple instead of returning it directly
+        yield (successful_items, failed_items)
 
     try:
         # Collect results from all partitions
