@@ -50,44 +50,13 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
 logger = logging.getLogger(__name__)
 
-def get_step_function_inputs():
-    """Get inputs from Step Functions environment variables"""
-    try:
-        task_token = os.environ.get('TASK_TOKEN')
-        file_key = os.environ.get('FILE_KEY')
-        execution_id = os.environ.get('EXECUTION_ID')
-        bucket_name = os.environ.get('BUCKET_NAME')
-        validation_metadata = os.environ.get('VALIDATION_METADATA')
-        
-        if not all([task_token, file_key, execution_id, bucket_name]):
-            raise ValueError("Missing required environment variables")
-        
-        # Parse validation metadata
-        validation_result = {}
-        if validation_metadata:
-            try:
-                validation_result = json.loads(validation_metadata)
-            except json.JSONDecodeError as e:
-                logger.warning(f"Failed to parse validation metadata: {e}")
-        
-        return {
-            'task_token': task_token,
-            'file_key': file_key,
-            'execution_id': execution_id,
-            'bucket_name': bucket_name,
-            'validation_result': validation_result
-        }
-    except Exception as e:
-        logger.error(f"Failed to get Step Function inputs: {e}")
-        raise
-
 def send_task_success(task_token, output_data):
-    """Send task success back to Step Functions"""
+    """Send success signal to Step Functions"""
     try:
         stepfunctions = boto3.client('stepfunctions', region_name=AWS_REGION)
         stepfunctions.send_task_success(
             taskToken=task_token,
-            output=json.dumps(output_data, default=str)
+            output=json.dumps(output_data)
         )
         logger.info("Task success sent to Step Functions")
     except Exception as e:
@@ -95,51 +64,39 @@ def send_task_success(task_token, output_data):
         raise
 
 def send_task_failure(task_token, error_message):
-    """Send task failure back to Step Functions"""
+    """Send failure signal to Step Functions"""
     try:
         stepfunctions = boto3.client('stepfunctions', region_name=AWS_REGION)
         stepfunctions.send_task_failure(
             taskToken=task_token,
-            error='TransformationError',
+            error="TransformationError",
             cause=error_message
         )
         logger.error(f"Task failure sent to Step Functions: {error_message}")
     except Exception as e:
         logger.error(f"Failed to send task failure: {e}")
 
-def get_validated_files(validation_result, file_key):
-    """Get list of files that passed validation"""
-    try:
-        # If validation result is available, filter files
-        if validation_result and 'validated_files' in validation_result:
-            validated_files = validation_result['validated_files']
-            logger.info(f"Processing {len(validated_files)} validated files")
-            return validated_files
-        
-        # Fallback: get all files from the folder
-        s3_client = boto3.client('s3', region_name=AWS_REGION)
-        files_to_process = {}
-        
-        for data_type, path in DATA_PATHS.items():
-            folder_path = f"{file_key}/{path}" if not file_key.endswith('/') else f"{file_key}{path}"
-            
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BUCKET,
-                Prefix=folder_path
-            )
-            
-            if 'Contents' in response:
-                files_to_process[data_type] = [obj['Key'] for obj in response['Contents'] 
-                                             if obj['Key'].endswith('.csv')]
-            else:
-                files_to_process[data_type] = []
-        
-        logger.info(f"Found files to process: {files_to_process}")
-        return files_to_process
-        
-    except Exception as e:
-        logger.error(f"Failed to get validated files: {e}")
-        return {}
+def get_environment_variables():
+    """Get required environment variables from ECS task"""
+    required_vars = ['TASK_TOKEN', 'FILE_KEY', 'EXECUTION_ID', 'BUCKET_NAME']
+    env_vars = {}
+    
+    for var in required_vars:
+        value = os.environ.get(var)
+        if not value:
+            raise ValueError(f"Required environment variable {var} not found")
+        env_vars[var] = value
+    
+    # Optional validation metadata
+    validation_metadata = os.environ.get('VALIDATION_METADATA')
+    if validation_metadata:
+        try:
+            env_vars['VALIDATION_METADATA'] = json.loads(validation_metadata)
+        except json.JSONDecodeError:
+            logger.warning("Invalid validation metadata JSON, ignoring")
+            env_vars['VALIDATION_METADATA'] = None
+    
+    return env_vars
 
 def create_dynamodb_table(table_name, table_config):
     """Create DynamoDB table if it doesn't exist"""
@@ -204,7 +161,39 @@ def setup_spark_session():
         logger.error(f"Failed to initialize Spark session: {e}")
         return None
 
-def archive_processed_files(files_to_process):
+def get_files_from_folder(bucket_name, folder_path):
+    """Get files from specific folder that was validated"""
+    s3_client = boto3.client('s3', region_name=AWS_REGION)
+    files_to_process = {}
+    
+    try:
+        # If folder_path doesn't end with '/', add it
+        if not folder_path.endswith('/'):
+            folder_path += '/'
+        
+        for data_type, path in DATA_PATHS.items():
+            full_path = folder_path + path
+            logger.info(f"Looking for {data_type} files in: {full_path}")
+            
+            response = s3_client.list_objects_v2(
+                Bucket=bucket_name,
+                Prefix=full_path
+            )
+            
+            if 'Contents' in response:
+                files_to_process[data_type] = [obj['Key'] for obj in response['Contents'] 
+                                             if obj['Key'].endswith('.csv')]
+                logger.info(f"Found {len(files_to_process[data_type])} {data_type} files")
+            else:
+                files_to_process[data_type] = []
+                logger.warning(f"No {data_type} files found in {full_path}")
+        
+        return files_to_process
+    except Exception as e:
+        logger.error(f"Failed to list S3 files: {e}")
+        return {}
+
+def archive_processed_files(files_to_process, bucket_name, execution_id):
     """Move processed files to archive bucket"""
     s3_client = boto3.client('s3', region_name=AWS_REGION)
     timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -216,23 +205,23 @@ def archive_processed_files(files_to_process):
         for data_type, file_list in files_to_process.items():
             for file_key in file_list:
                 try:
-                    # Create archive key with timestamp
-                    archive_key = f"processed/{timestamp}/{file_key}"
+                    # Create archive key with execution ID and timestamp
+                    archive_key = f"processed/{execution_id}/{timestamp}/{file_key}"
                     
                     # Copy file to archive bucket
-                    copy_source = {'Bucket': S3_BUCKET, 'Key': file_key}
+                    copy_source = {'Bucket': bucket_name, 'Key': file_key}
                     s3_client.copy_object(
                         CopySource=copy_source,
                         Bucket=S3_ARCHIVE_BUCKET,
                         Key=archive_key
                     )
                     
-                    # Verify the copy succeeded by checking if file exists in archive
+                    # Verify the copy succeeded
                     try:
                         s3_client.head_object(Bucket=S3_ARCHIVE_BUCKET, Key=archive_key)
                         
                         # Delete from original bucket only after successful copy verification
-                        s3_client.delete_object(Bucket=S3_BUCKET, Key=file_key)
+                        s3_client.delete_object(Bucket=bucket_name, Key=file_key)
                         moved_files.append(file_key)
                         logger.info(f"Successfully moved {file_key} to archive")
                         
@@ -249,7 +238,7 @@ def archive_processed_files(files_to_process):
         
         if failed_files:
             logger.warning(f"Failed to move {len(failed_files)} files: {failed_files}")
-            return len(failed_files) == 0  # Return False if any files failed
+            return len(failed_files) == 0
         
         return True
         
@@ -257,32 +246,37 @@ def archive_processed_files(files_to_process):
         logger.error(f"Failed to archive files: {e}")
         return False
 
-def load_data_from_s3(spark, files_to_process):
-    """Load data from S3 with selective caching - only validated files"""
+def load_data_from_s3(spark, bucket_name, files_to_process):
+    """Load data from S3 using specific files"""
     try:
-        # Build file paths from validated files
-        orders_files = files_to_process.get('orders', [])
-        items_files = files_to_process.get('order_items', [])
-        products_files = files_to_process.get('products', [])
+        logger.info("Loading data from S3...")
         
-        if not all([orders_files, items_files, products_files]):
-            raise ValueError("Missing required data files after validation")
+        # Check if we have the required files
+        required_types = ['orders', 'order_items', 'products']
+        for req_type in required_types:
+            if not files_to_process.get(req_type):
+                raise ValueError(f"No {req_type} files found for processing")
         
-        # Create full S3 paths
-        orders_paths = [f"s3a://{S3_BUCKET}/{file}" for file in orders_files]
-        items_paths = [f"s3a://{S3_BUCKET}/{file}" for file in items_files]
-        products_paths = [f"s3a://{S3_BUCKET}/{file}" for file in products_files]
+        # Build S3 paths for each data type
+        orders_paths = [f"s3a://{bucket_name}/{file}" for file in files_to_process['orders']]
+        items_paths = [f"s3a://{bucket_name}/{file}" for file in files_to_process['order_items']]
+        products_paths = [f"s3a://{bucket_name}/{file}" for file in files_to_process['products']]
         
-        logger.info("Loading validated data from S3...")
-        
-        # Cache orders and items as they're used multiple times
+        # Load data with union for multiple files
         orders_df = spark.read.option("header", "true").option("inferSchema", "true").csv(orders_paths).cache()
         items_df = spark.read.option("header", "true").option("inferSchema", "true").csv(items_paths).cache()
-        
-        # Don't cache products as it's only used once for joining
         products_df = spark.read.option("header", "true").option("inferSchema", "true").csv(products_paths)
 
-        logger.info("Data loaded successfully from S3")
+        # Validate data loaded
+        orders_count = orders_df.count()
+        items_count = items_df.count()
+        products_count = products_df.count()
+        
+        logger.info(f"Data loaded successfully - Orders: {orders_count}, Items: {items_count}, Products: {products_count}")
+        
+        if orders_count == 0 or items_count == 0 or products_count == 0:
+            raise ValueError("One or more datasets are empty")
+        
         return orders_df, items_df, products_df
 
     except Exception as e:
@@ -361,12 +355,6 @@ def calculate_order_metrics(items_df, orders_df):
         logger.error(f"Failed to calculate order metrics: {e}")
         return None
 
-def convert_to_decimal(value):
-    """Convert numeric values to Decimal for DynamoDB"""
-    if isinstance(value, (int, float)):
-        return Decimal(str(value))
-    return value
-
 def write_metrics_to_dynamodb(spark_df, table_name, primary_keys):
     """Generic function to write metrics to DynamoDB with retry logic"""
     logger.info(f"Writing metrics to DynamoDB table: {table_name}")
@@ -404,7 +392,7 @@ def write_metrics_to_dynamodb(spark_df, table_name, primary_keys):
                     return
                 except ClientError as e:
                     if e.response['Error']['Code'] == 'ProvisionedThroughputExceededException' and attempt < max_retries:
-                        time.sleep(2 ** attempt)  # Exponential backoff
+                        time.sleep(2 ** attempt)
                         continue
                     failed_items += len(items)
                     break
@@ -444,34 +432,31 @@ def write_metrics_to_dynamodb(spark_df, table_name, primary_keys):
     try:
         # Collect results from all partitions
         results = spark_df.rdd.mapPartitions(process_partition).collect()
-        total_successful = sum(r[0] for r in results)
-        total_failed = sum(r[1] for r in results)
+        total_successful = sum(result[0] for result in results if result)
+        total_failed = sum(result[1] for result in results if result)
         
-        logger.info(f"Completed writing to DynamoDB table: {table_name} - Success: {total_successful}, Failed: {total_failed}")
+        logger.info(f"DynamoDB write completed for {table_name}: {total_successful} successful, {total_failed} failed")
         return total_successful, total_failed
+        
     except Exception as e:
         logger.error(f"Error writing to {table_name}: {e}")
         raise
 
-def run_analytics_pipeline():
-    """Main pipeline orchestration for Step Functions"""
+def run_transformation_task():
+    """Main transformation task for ECS"""
     spark = None
     task_token = None
     
     try:
-        # Get Step Functions inputs
-        step_inputs = get_step_function_inputs()
-        task_token = step_inputs['task_token']
-        file_key = step_inputs['file_key']
-        execution_id = step_inputs['execution_id']
-        validation_result = step_inputs['validation_result']
+        # Get environment variables
+        env_vars = get_environment_variables()
+        task_token = env_vars['TASK_TOKEN']
+        file_key = env_vars['FILE_KEY']
+        execution_id = env_vars['EXECUTION_ID']
+        bucket_name = env_vars['BUCKET_NAME']
+        validation_metadata = env_vars.get('VALIDATION_METADATA')
         
-        logger.info(f"Starting transformation for execution: {execution_id}")
-        
-        # Get validated files
-        files_to_process = get_validated_files(validation_result, file_key)
-        if not files_to_process:
-            raise ValueError("No validated files found to process")
+        logger.info(f"Starting transformation for execution: {execution_id}, folder: {file_key}")
         
         # Setup infrastructure
         if not setup_dynamodb_tables():
@@ -479,10 +464,15 @@ def run_analytics_pipeline():
         
         spark = setup_spark_session()
         if not spark:
-            raise Exception("Failed to setup Spark session")
+            raise Exception("Failed to initialize Spark session")
+
+        # Get files from the specific folder that was validated
+        files_to_process = get_files_from_folder(bucket_name, file_key)
+        if not files_to_process:
+            raise Exception("No files found to process")
 
         # Load and transform data
-        orders_df, items_df, products_df = load_data_from_s3(spark, files_to_process)
+        orders_df, items_df, products_df = load_data_from_s3(spark, bucket_name, files_to_process)
         if not all([orders_df, items_df, products_df]):
             raise Exception("Failed to load data from S3")
 
@@ -494,54 +484,61 @@ def run_analytics_pipeline():
         category_metrics_df = calculate_category_metrics(items_df, orders_df, products_df)
         order_metrics_df = calculate_order_metrics(items_df, orders_df)
 
-        # Write to DynamoDB and collect stats
+        if not category_metrics_df or not order_metrics_df:
+            raise Exception("Failed to calculate metrics")
+
+        # Write to DynamoDB and collect statistics
         total_records_processed = 0
         
-        if category_metrics_df:
-            cat_success, cat_failed = write_metrics_to_dynamodb(
-                category_metrics_df, 
-                "category_metrics_table", 
-                ['category', 'order_date']
-            )
-            total_records_processed += cat_success
+        cat_success, cat_failed = write_metrics_to_dynamodb(
+            category_metrics_df, 
+            "category_metrics_table", 
+            ['category', 'order_date']
+        )
+        total_records_processed += cat_success
         
-        if order_metrics_df:
-            order_success, order_failed = write_metrics_to_dynamodb(
-                order_metrics_df, 
-                "order_metrics_table", 
-                ['order_date']
-            )
-            total_records_processed += order_success
+        ord_success, ord_failed = write_metrics_to_dynamodb(
+            order_metrics_df, 
+            "order_metrics_table", 
+            ['order_date']
+        )
+        total_records_processed += ord_success
 
         # Archive processed files
-        archive_success = archive_processed_files(files_to_process)
+        archive_success = archive_processed_files(files_to_process, bucket_name, execution_id)
         
         # Prepare success response
         success_response = {
             "status": "success",
             "recordsProcessed": total_records_processed,
+            "categoryMetrics": cat_success,
+            "orderMetrics": ord_success,
+            "failedRecords": cat_failed + ord_failed,
+            "archiveStatus": "success" if archive_success else "partial_failure",
             "executionId": execution_id,
-            "filesProcessed": sum(len(files) for files in files_to_process.values()),
-            "archiveSuccess": archive_success,
-            "timestamp": datetime.datetime.now().isoformat()
+            "processedFiles": {
+                "orders": len(files_to_process.get('orders', [])),
+                "orderItems": len(files_to_process.get('order_items', [])),
+                "products": len(files_to_process.get('products', []))
+            }
         }
         
         # Send success to Step Functions
         send_task_success(task_token, success_response)
-        
-        logger.info(f"Analytics pipeline completed successfully for execution: {execution_id}")
+        logger.info(f"Transformation completed successfully for execution: {execution_id}")
 
     except Exception as e:
-        error_message = f"Analytics pipeline failed: {str(e)}"
+        error_message = f"Transformation failed: {str(e)}"
         logger.error(error_message)
         
         if task_token:
             send_task_failure(task_token, error_message)
         
+        raise e
     finally:
         if spark:
             spark.stop()
             logger.info("Spark session terminated")
 
 if __name__ == "__main__":
-    run_analytics_pipeline()
+    run_transformation_task()
