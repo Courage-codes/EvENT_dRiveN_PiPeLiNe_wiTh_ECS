@@ -133,7 +133,7 @@ Validation Task               Transformation Task
 
 **Transformation Container**
 - **Purpose**: Data processing and analytics
-- **Runtime**: Apache Spark + Python
+- **Runtime**: Apache Spark
 - **Output**: Computed KPIs to DynamoDB
 
 ---
@@ -302,28 +302,28 @@ python -m pytest tests/integration/ -v
 
 ---
 
-## File Structure & Resources
 
-### Project Organization
-```
-ecommerce-pipeline/
-├── .github/workflows/           # CI/CD configuration
-├── containers/
-│   ├── validation/
-│   │   ├── Dockerfile
-│   │   └── validation.py
-│   └── transformation/
-│       ├── Dockerfile
-│       └── transformation.py
-├── lambda/
-│   └── file_aggregator.py
-├── step-functions/
-│   └── state_machine.json
-├── tests/                       # Test suite
-├── docs/                        # Documentation
-└── scripts/                     # Deployment scripts
-```
+## File Structure
 
+```
+project-root/
+├── .github/
+│   └── workflows/
+│       ├── ci-cd.yml                    # CI/CD pipeline
+│       └── requirements.txt             # Pipeline dependencies
+├── tests/
+│   ├── test_validation.py               # Validation tests
+│   └── test_transformation.py           # Transformation tests
+├── validation-image/
+│   ├── Dockerfile                       # Validation container
+│   └── validation.py                    # Validation script
+├── transformation-image/
+│   ├── Dockerfile                       # Transformation container
+│   └── transformation.py                # Transformation script
+├── lambda_function.py                   # File aggregation logic
+├── stepfunction.json                    # Step Functions definition
+└── requirements-test.txt                # Test dependencies
+```
 ### Resource Allocation
 
 #### ECS Task Resources
