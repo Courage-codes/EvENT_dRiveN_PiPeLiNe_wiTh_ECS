@@ -182,89 +182,104 @@ def move_file_to_quarantine(bucket_name, source_key, quarantine_prefix):
         logger.error(f"Error moving file to quarantine: {e}")
         return False
 
-def determine_folder_type(file_key):
-    """Determine which folder type based on the file key."""
-    if file_key.endswith('/'):
-        # It's a folder path, extract folder name
-        folder_path = file_key.rstrip('/')
-        folder_name = folder_path.split('/')[-1]
-        return folder_name if folder_name in FOLDERS else None
+def get_folder_prefix(file_key):
+    """Get the folder prefix to search within."""
+    if not file_key or file_key == "":
+        # Empty file_key means process all folders from root
+        return ""
+    elif file_key.endswith('/'):
+        # It's already a folder path
+        return file_key
     else:
-        # It's a file path, determine from the path
-        for folder_name, folder_prefix in FOLDERS.items():
-            if file_key.startswith(folder_prefix):
-                return folder_name
-        return None
+        # It's a file path, extract the folder
+        return '/'.join(file_key.split('/')[:-1]) + '/' if '/' in file_key else ""
 
-def process_folder(bucket_name, folder_name):
-    """Process all files in a specific folder."""
-    logger.info(f"Processing folder: {folder_name}")
+def process_all_folders(bucket_name, base_prefix=""):
+    """Process all required folders for the transformation pipeline."""
+    logger.info(f"Processing all folders with base prefix: '{base_prefix}'")
     
-    folder_prefix = FOLDERS[folder_name]
-    quarantine_prefix = QUARANTINE_FOLDERS[folder_name]
+    overall_results = {
+        'total_files': 0,
+        'passed': 0,
+        'failed': 0,
+        'quarantined': 0,
+        'folder_results': {}
+    }
     
-    # List all files in the folder
-    files = list_s3_files(bucket_name, folder_prefix)
-    
-    if not files:
-        logger.info(f"No files to process in {folder_name}")
-        return {
-            'total_files': 0,
+    # Process each required folder type
+    for folder_name, folder_suffix in FOLDERS.items():
+        logger.info(f"Processing {folder_name} folder...")
+        
+        # Construct the full folder path
+        folder_prefix = base_prefix + folder_suffix
+        quarantine_prefix = QUARANTINE_FOLDERS[folder_name]
+        
+        # List all files in this folder
+        files = list_s3_files(bucket_name, folder_prefix)
+        
+        folder_results = {
+            'total_files': len(files),
             'passed': 0,
             'failed': 0,
             'quarantined': 0,
             'processed_files': []
         }
-    
-    results = {
-        'total_files': len(files),
-        'passed': 0,
-        'failed': 0,
-        'quarantined': 0,
-        'processed_files': []
-    }
-    
-    for file_key in files:
-        logger.info(f"Processing file: {file_key}")
         
-        file_result = {
-            'file_key': file_key,
-            'status': 'unknown',
-            'issues': []
-        }
-        
-        # Read file header
-        headers = read_s3_file_header(bucket_name, file_key)
-        
-        # Validate schema
-        validation_result = validate_schema(headers, folder_name)
-        
-        if validation_result['is_valid']:
-            logger.info(f"✓ File passed validation: {file_key}")
-            results['passed'] += 1
-            file_result['status'] = 'passed'
+        if not files:
+            logger.warning(f"No files found in {folder_name} folder: {folder_prefix}")
+            folder_results['status'] = 'no_files'
         else:
-            logger.warning(f"✗ File failed validation: {file_key}")
-            logger.warning(f"Issues: {validation_result['issues']}")
-            results['failed'] += 1
-            file_result['status'] = 'failed'
-            file_result['issues'] = validation_result['issues']
+            # Process each file in this folder
+            for file_key in files:
+                logger.info(f"Processing file: {file_key}")
+                
+                file_result = {
+                    'file_key': file_key,
+                    'status': 'unknown',
+                    'issues': []
+                }
+                
+                # Read file header
+                headers = read_s3_file_header(bucket_name, file_key)
+                
+                # Validate schema
+                validation_result = validate_schema(headers, folder_name)
+                
+                if validation_result['is_valid']:
+                    logger.info(f"✓ File passed validation: {file_key}")
+                    folder_results['passed'] += 1
+                    file_result['status'] = 'passed'
+                else:
+                    logger.warning(f"✗ File failed validation: {file_key}")
+                    logger.warning(f"Issues: {validation_result['issues']}")
+                    folder_results['failed'] += 1
+                    file_result['status'] = 'failed'
+                    file_result['issues'] = validation_result['issues']
+                    
+                    # Move to quarantine
+                    if move_file_to_quarantine(bucket_name, file_key, quarantine_prefix):
+                        folder_results['quarantined'] += 1
+                        file_result['status'] = 'quarantined'
+                
+                folder_results['processed_files'].append(file_result)
             
-            # Move to quarantine
-            if move_file_to_quarantine(bucket_name, file_key, quarantine_prefix):
-                results['quarantined'] += 1
-                file_result['status'] = 'quarantined'
+            folder_results['status'] = 'processed'
         
-        results['processed_files'].append(file_result)
+        # Add folder results to overall results
+        overall_results['folder_results'][folder_name] = folder_results
+        overall_results['total_files'] += folder_results['total_files']
+        overall_results['passed'] += folder_results['passed']
+        overall_results['failed'] += folder_results['failed']
+        overall_results['quarantined'] += folder_results['quarantined']
+        
+        # Log summary for this folder
+        logger.info(f"Folder {folder_name} processing complete:")
+        logger.info(f"  Total files: {folder_results['total_files']}")
+        logger.info(f"  Passed: {folder_results['passed']}")
+        logger.info(f"  Failed: {folder_results['failed']}")
+        logger.info(f"  Quarantined: {folder_results['quarantined']}")
     
-    # Log summary for this folder
-    logger.info(f"Folder {folder_name} processing complete:")
-    logger.info(f"  Total files: {results['total_files']}")
-    logger.info(f"  Passed: {results['passed']}")
-    logger.info(f"  Failed: {results['failed']}")
-    logger.info(f"  Quarantined: {results['quarantined']}")
-    
-    return results
+    return overall_results
 
 def main():
     """Main function to validate files and send results to Step Functions."""
@@ -273,32 +288,39 @@ def main():
     logger.info(f"File Key: {FILE_KEY}")
     
     try:
-        # Determine which folder to process
-        folder_name = determine_folder_type(FILE_KEY)
+        # Get the base prefix from FILE_KEY
+        base_prefix = get_folder_prefix(FILE_KEY)
+        logger.info(f"Using base prefix: '{base_prefix}'")
         
-        if not folder_name:
-            error_msg = f"Could not determine folder type from file key: {FILE_KEY}"
-            logger.error(error_msg)
-            send_task_failure("ValidationError", error_msg)
-            return
+        # Process all required folders
+        results = process_all_folders(S3_BUCKET, base_prefix)
         
-        logger.info(f"Processing folder type: {folder_name}")
+        # Check if we have files in all required folders
+        required_folders = ['orders', 'order_items', 'products']
+        missing_folders = []
         
-        # Process the folder
-        results = process_folder(S3_BUCKET, folder_name)
+        for folder in required_folders:
+            folder_result = results['folder_results'].get(folder, {})
+            if folder_result.get('total_files', 0) == 0:
+                missing_folders.append(folder)
         
         # Prepare metadata for Step Functions
         metadata = {
-            'folder_type': folder_name,
             'validation_results': results,
             'execution_id': EXECUTION_ID,
+            'base_prefix': base_prefix,
             'timestamp': str(boto3.Session().region_name)
         }
         
-        # Check if validation was successful overall
-        if results['failed'] > 0:
+        # Determine overall status
+        if missing_folders:
+            logger.error(f"Missing required folders: {missing_folders}")
+            metadata['status'] = 'failure'
+            metadata['error'] = f"Missing required data folders: {missing_folders}"
+            send_task_failure("ValidationError", f"Missing required data folders: {missing_folders}")
+            return
+        elif results['failed'] > 0:
             logger.warning(f"Validation completed with {results['failed']} failed files")
-            # Still send success but with warning metadata
             metadata['status'] = 'partial_success'
             metadata['warning'] = f"{results['failed']} files failed validation and were quarantined"
         else:
@@ -314,6 +336,11 @@ def main():
         logger.info(f"Files passed validation: {results['passed']}")
         logger.info(f"Files failed validation: {results['failed']}")
         logger.info(f"Files moved to quarantine: {results['quarantined']}")
+        
+        # Log per-folder summary
+        for folder_name, folder_result in results['folder_results'].items():
+            logger.info(f"{folder_name.upper()}: {folder_result['passed']}/{folder_result['total_files']} files passed")
+        
         logger.info("="*50)
         
     except Exception as e:
